@@ -6,6 +6,7 @@ import clojure.lang.IFn;
 import clojure.lang.IKVReduce;
 import clojure.lang.IMapEntry;
 import clojure.lang.IPersistentMap;
+import clojure.lang.IReduceInit;
 import clojure.lang.Keyword;
 import clojure.lang.Ratio;
 import clojure.lang.Symbol;
@@ -345,17 +346,42 @@ public final class JsonWriter {
         }
     }
 
-    private void writeIterable(Iterable<?> it) {
-        ensure(2);
-        buf[n++] = '[';
-        boolean first = true;
-        for (Object o : it) {
-            if (!first) {
+    /**
+     * Same idea as entryWriter: reduce hands elements to the callback
+     * directly, skipping the iterator allocation and the per-element
+     * hasNext/next calls (PersistentVector reduces over its chunks).
+     */
+    private final IFn elementWriter = new AFn() {
+        @Override
+        public Object invoke(Object acc, Object x) {
+            if (needComma) {
                 ensure(1);
                 buf[n++] = ',';
             }
-            first = false;
-            writeValue(o);
+            needComma = true;
+            writeValue(x);
+            return acc;
+        }
+    };
+
+    private void writeIterable(Iterable<?> it) {
+        ensure(2);
+        buf[n++] = '[';
+        if (it instanceof IReduceInit r) {
+            boolean saved = needComma; // nested collections reenter
+            needComma = false;
+            r.reduce(elementWriter, null);
+            needComma = saved;
+        } else {
+            boolean first = true;
+            for (Object o : it) {
+                if (!first) {
+                    ensure(1);
+                    buf[n++] = ',';
+                }
+                first = false;
+                writeValue(o);
+            }
         }
         ensure(1);
         buf[n++] = ']';

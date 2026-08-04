@@ -70,14 +70,17 @@ JVM numbers (Ratio written as double), booleans, nil. NaN/Infinity throw.
 Criterium means, Apple M-series, JDK 25, default (scalar) configuration,
 vs jsonista (Jackson). Keyword keys:
 
-| payload | read | write |
-|---|---|---|
-| number-heavy | **2.4x** | 1.3x |
-| citm_catalog | **1.8x** | **2.3x** |
-| small objects, repeated keys | **1.9x** | 1.4x |
-| string-heavy (raw UTF-8) | **1.2x** | 0.9x |
-| string-heavy (\uXXXX escapes) | **1.1x** | 0.9x |
-| twitter.json | **1.2x** | **1.8x** |
+| payload | read | read (SIMD) | write | write (SIMD) |
+|---|---|---|---|---|
+| number-heavy | **2.4x** | = | 1.3x | = |
+| citm_catalog | **1.8x** | = | **2.3x** | = |
+| small objects, repeated keys | **1.9x** | = | 1.4x | = |
+| string-heavy (raw UTF-8) | **1.2x** | **1.6x** | 0.9x | 1.0x |
+| string-heavy (\uXXXX escapes) | **1.1x** | = | 0.9x | 1.0x |
+| twitter.json | **1.2x** | = | **1.8x** | = |
+
+SIMD columns measured with the Vector API enabled (see below); `=` means
+within run-to-run noise of the scalar number.
 
 **Writes allocate nothing beyond the returned array** (numbers included, via a
 Ryū port). Run `clj -M:bench -m s-exp.oda.bench` to reproduce (`clj
@@ -90,10 +93,9 @@ With the (incubating) Vector API enabled, string scanning and encoding go
 
 Measured A/B deltas on the same JVM: 
 
-* raw string-heavy read **+21%**
-* twitter read **+10%**
-* string-heavy writes **+5-8%**, 
-* long pure-ASCII string writes **~5x**; 
+* raw string-heavy read **+22%**
+* string-heavy writes **+5-6%**
+* long pure-ASCII string writes **~5x**
 * short-string payloads unaffected (a run-length heuristic keeps them on the scalar path). 
 
 

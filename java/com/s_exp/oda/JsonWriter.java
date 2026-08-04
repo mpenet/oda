@@ -10,6 +10,7 @@ import clojure.lang.Symbol;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -66,6 +67,7 @@ public final class JsonWriter {
     private byte[] buf = new byte[1024];
     private int n;
     private IFn defaultFn;
+    private OutputStream out; // non-null = streaming mode: flush on overflow
 
     // ------------------------------------------------------------ public API
 
@@ -89,14 +91,37 @@ public final class JsonWriter {
         }
     }
 
+    /**
+     * Writes progressively: the internal buffer is flushed to {@code out}
+     * whenever it fills, so memory stays bounded by the buffer size (plus
+     * the largest single string) regardless of document size.
+     */
     public static void writeStream(Object x, IFn defaultFn, OutputStream out) throws IOException {
         JsonWriter w = acquire(defaultFn);
         try {
+            if (w.buf.length < (1 << 16)) {
+                w.buf = new byte[1 << 16];
+            }
+            w.out = out;
             w.writeValue(x);
-            out.write(w.buf, 0, w.n);
+            w.flushBuf();
             out.flush();
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
         } finally {
+            w.out = null;
             w.release();
+        }
+    }
+
+    private void flushBuf() {
+        if (n > 0) {
+            try {
+                out.write(buf, 0, n);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            n = 0;
         }
     }
 
@@ -471,11 +496,19 @@ public final class JsonWriter {
 
     private void ensure(int k) {
         if (n + k > buf.length) {
-            grow(n + k);
+            overflow(k);
         }
     }
 
-    private void grow(int min) {
-        buf = Arrays.copyOf(buf, Math.max(min, buf.length << 1));
+    private void overflow(int k) {
+        if (out != null) {
+            flushBuf();
+            if (k > buf.length) {
+                // single oversized value, e.g. a huge string reservation
+                buf = new byte[k];
+            }
+        } else {
+            buf = Arrays.copyOf(buf, Math.max(n + k, buf.length << 1));
+        }
     }
 }

@@ -271,6 +271,20 @@
     (is (= "{\"a\":[1,2]}" (String. (.toByteArray out) "UTF-8"))))
   (is (= {:a [1 2]} (oda/parse (oda/write-bytes {:a [1 2]}) {:key-fn keyword}))))
 
+(deftest writer-streaming
+  ;; streamed output must be byte-identical to buffered output
+  (let [v (vec (repeatedly 5000 (fn [] {:id (rand-int 100000)
+                                        :name (str "entity-" (rand-int 1000) "-é🎵")
+                                        :tags ["a" "b"]})))
+        out (java.io.ByteArrayOutputStream.)]
+    (oda/write v out)
+    (is (= (seq (oda/write-bytes v)) (seq (.toByteArray out)))))
+  ;; single string larger than the 64KB stream buffer
+  (let [s (apply str (repeat 200000 "x"))
+        out (java.io.ByteArrayOutputStream.)]
+    (oda/write [s] out)
+    (is (= [s] (oda/parse (.toByteArray out))))))
+
 (deftest writer-lone-surrogate
   ;; lone surrogates cannot be encoded as UTF-8; we emit U+FFFD
   (is (= "\"�\"" (oda/write-str (String. (char-array [(char 0xD800)]))))))

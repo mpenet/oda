@@ -1,6 +1,5 @@
 {:paths ["src" "classes"]
- :deps {org.clojure/clojure {:mvn/version "1.12.1"}
-        ch.randelshofer/fastdoubleparser {:mvn/version "2.0.1"}}
+ :deps {org.clojure/clojure {:mvn/version "1.12.1"}}
  :aliases
  {:build
   {:deps {io.github.clojure/tools.build {:mvn/version "0.10.9"}}

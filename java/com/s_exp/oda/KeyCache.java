@@ -1,4 +1,4 @@
-package com.s_exp.jzon;
+package com.s_exp.oda;
 
 import clojure.lang.Keyword;
 
@@ -6,19 +6,24 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 /**
- * Open-addressing cache from raw ASCII byte spans to interned Keywords.
- * Avoids materializing a String per key on the hot path. Bounded to
- * MAX_ENTRIES to prevent adversarial blowup; past that, misses fall
- * through to plain interning without caching.
+ * Open-addressing cache from raw ASCII byte spans to interned key objects
+ * (Keyword or String depending on mode). Avoids materializing a String per
+ * key on the hot path. Bounded to MAX_ENTRIES to prevent adversarial blowup;
+ * past that, misses fall through to plain interning without caching.
  */
-final class KeywordCache {
+final class KeyCache {
     private static final int MAX_ENTRIES = 4096;
 
+    private final boolean keyword;
     private byte[][] keys = new byte[1024][];
-    private Keyword[] vals = new Keyword[1024];
+    private Object[] vals = new Object[1024];
     private int size;
 
-    Keyword intern(byte[] buf, int off, int len) {
+    KeyCache(boolean keyword) {
+        this.keyword = keyword;
+    }
+
+    Object intern(byte[] buf, int off, int len) {
         byte[][] ks = keys;
         int mask = ks.length - 1;
         int i = hash(buf, off, len) & mask;
@@ -32,7 +37,8 @@ final class KeywordCache {
             }
             i = (i + 1) & mask;
         }
-        Keyword kw = Keyword.intern(new String(buf, off, len, StandardCharsets.ISO_8859_1));
+        String s = new String(buf, off, len, StandardCharsets.ISO_8859_1);
+        Object v = keyword ? Keyword.intern(s) : s;
         if (size < MAX_ENTRIES) {
             if ((size + 1) * 2 > ks.length) {
                 rehash();
@@ -44,18 +50,18 @@ final class KeywordCache {
                 }
             }
             ks[i] = Arrays.copyOfRange(buf, off, off + len);
-            vals[i] = kw;
+            vals[i] = v;
             size++;
         }
-        return kw;
+        return v;
     }
 
     private void rehash() {
         byte[][] oldKeys = keys;
-        Keyword[] oldVals = vals;
+        Object[] oldVals = vals;
         int cap = oldKeys.length << 1;
         byte[][] newKeys = new byte[cap][];
-        Keyword[] newVals = new Keyword[cap];
+        Object[] newVals = new Object[cap];
         int mask = cap - 1;
         for (int i = 0; i < oldKeys.length; i++) {
             byte[] k = oldKeys[i];

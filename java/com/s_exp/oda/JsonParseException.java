@@ -1,4 +1,4 @@
-package com.s_exp.jzon;
+package com.s_exp.oda;
 
 public final class JsonParseException extends RuntimeException {
     public final int position;

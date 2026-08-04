@@ -1,1 +1,3 @@
-# a json lib
+# oda
+
+Fast JSON parser for Clojure.

@@ -1,6 +1,6 @@
-(ns s-exp.jzon
+(ns s-exp.oda
   "Fast JSON parser building Clojure data structures directly from UTF-8 bytes."
-  (:import (com.s_exp.jzon JsonParser)
+  (:import (com.s_exp.oda JsonParser)
            (java.io InputStream)
            (java.nio.charset StandardCharsets)))
 
@@ -14,7 +14,7 @@
   * `:keywordize` - convert object keys to keywords (default true)
   * `:max-depth`  - maximum nesting depth (default 1000)
 
-  Throws `com.s_exp.jzon.JsonParseException` on invalid input."
+  Throws `com.s_exp.oda.JsonParseException` on invalid input."
   ([input]
    (parse input nil))
   ([input {:keys [keywordize max-depth]

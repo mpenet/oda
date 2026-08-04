@@ -79,17 +79,25 @@ vs jsonista (Jackson). Keyword keys:
 | string-heavy (\uXXXX escapes) | **1.1x** | 0.9x |
 | twitter.json | **1.2x** | **2.0x** |
 
-Writes allocate nothing beyond the returned array (numbers included, via a
-Ryū port). Run `clj -M:bench -m s-exp.oda.bench` to reproduce
-(`clj -M:bench:vector` for the SIMD numbers).
+**Writes allocate nothing beyond the returned array** (numbers included, via a
+Ryū port). Run `clj -M:bench -m s-exp.oda.bench` to reproduce (`clj
+-M:bench:vector` for the SIMD numbers).
 
 ### Optional SIMD
 
 With the (incubating) Vector API enabled, string scanning and encoding go
-16 bytes at a time. Measured A/B deltas on the same JVM: raw string-heavy
-read +21%, twitter read +10%, string-heavy writes +5-8%, long pure-ASCII
-string writes ~5x; short-string payloads unaffected (a run-length heuristic
-keeps them on the scalar path). Enable with:
+16 bytes at a time. 
+
+Measured A/B deltas on the same JVM: 
+
+* raw string-heavy read **+21%**
+* twitter read **+10%**
+* string-heavy writes **+5-8%**, 
+* long pure-ASCII string writes **~5x**; 
+* short-string payloads unaffected (a run-length heuristic keeps them on the scalar path). 
+
+
+Enable with:
 
 ```shell
 clj -J--add-modules -Jjdk.incubator.vector ...

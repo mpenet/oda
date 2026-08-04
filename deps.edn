@@ -26,4 +26,8 @@
 
   :nrepl
   {:extra-deps {nrepl/nrepl {:mvn/version "1.3.1"}}
-   :main-opts ["-m" "nrepl.cmdline"]}}}
+   :main-opts ["-m" "nrepl.cmdline"]}
+
+  ;; opt-in SIMD scanning (combine: clj -M:test:vector, clj -M:bench:vector)
+  :vector
+  {:jvm-opts ["--add-modules" "jdk.incubator.vector"]}}}

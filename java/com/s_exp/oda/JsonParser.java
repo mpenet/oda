@@ -30,6 +30,26 @@ public final class JsonParser {
     private static final VarHandle LONG_LE =
             MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
+    /**
+     * True when jdk.incubator.vector is resolvable (requires
+     * --add-modules jdk.incubator.vector) and not disabled via
+     * -Doda.vector=false. Static final so the JIT dead-codes the untaken
+     * branch; VectorScan is only loaded when true.
+     */
+    static final boolean VECTOR = detectVector();
+
+    private static boolean detectVector() {
+        if ("false".equals(System.getProperty("oda.vector"))) {
+            return false;
+        }
+        try {
+            Class.forName("jdk.incubator.vector.ByteVector");
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static final int KEY_STRINGS = 0;
     private static final int KEY_KEYWORDS = 1;
     private static final int KEY_CUSTOM = 2;
@@ -207,7 +227,14 @@ public final class JsonParser {
         int p = start;
         long high = 0;
         while (true) {
+            int runStart = p;
             while (end - p >= 8) {
+                if (VECTOR && p - runStart >= 16) {
+                    long r = VectorScan.scanString(b, p, end);
+                    high |= r & 1L;
+                    p = (int) (r >>> 1);
+                    break;
+                }
                 long w = (long) LONG_LE.get(b, p);
                 long m = structMask(w);
                 if (m != 0) {
@@ -314,7 +341,17 @@ public final class JsonParser {
         int p = start;
         long high = 0;
         while (true) {
+            // SWAR covers the first 16 bytes of each clean run (most strings
+            // end there); only runs that prove long switch to SIMD — short
+            // spans lose to vector setup cost
+            int runStart = p;
             while (end - p >= 8) {
+                if (VECTOR && p - runStart >= 16) {
+                    long r = VectorScan.scanString(b, p, end);
+                    high |= r & 1L;
+                    p = (int) (r >>> 1);
+                    break;
+                }
                 long w = (long) LONG_LE.get(b, p);
                 long m = structMask(w);
                 if (m != 0) {
@@ -360,6 +397,10 @@ public final class JsonParser {
             // the copy loop is the JIT's byte->char inflate idiom
             int q = p;
             while (end - q >= 8) {
+                if (VECTOR && q - p >= 16) {
+                    q = VectorScan.scanSpecial(b, q, end);
+                    break;
+                }
                 long w = (long) LONG_LE.get(b, q);
                 long m = structMask(w) | (w & HIGH_BITS);
                 if (m != 0) {

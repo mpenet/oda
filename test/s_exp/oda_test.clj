@@ -209,3 +209,68 @@
                 (let [bs (j/write-value-as-bytes v)]
                   (= (j/read-value bs j/keyword-keys-object-mapper)
                      (parse-bytes bs nil)))))
+
+;; ----------------------------------------------------------------- writer
+
+(deftest writer-basics
+  (is (= "null" (oda/write-str nil)))
+  (is (= "true" (oda/write-str true)))
+  (is (= "[]" (oda/write-str [])))
+  (is (= "{}" (oda/write-str {})))
+  (is (= "{\"a\":1}" (oda/write-str {:a 1})))
+  (is (= "{\"a/b\":1}" (oda/write-str {:a/b 1})))
+  (is (= "{\"a\":1}" (oda/write-str {"a" 1})))
+  (is (= "{\"a\":1}" (oda/write-str {'a 1})))
+  (is (= "{\"1.5\":1}" (oda/write-str {1.5 1})))
+  (is (= "[1,2]" (oda/write-str '(1 2))))
+  (is (= "[1]" (oda/write-str #{1})))
+  (is (= "\"a\\\"b\\\\c\\nd\\u0000\"" (oda/write-str (str "a\"b\\c\nd" (char 0)))))
+  (is (= "\"é🎵\"" (oda/write-str "é🎵")))
+  (is (= "-9223372036854775808" (oda/write-str Long/MIN_VALUE)))
+  (is (= "123456789012345678901234567890" (oda/write-str 123456789012345678901234567890N)))
+  (is (= "1.5" (oda/write-str 1.5M)))
+  (is (= "\"c\"" (oda/write-str \c)))
+  (is (= "{\"a\":1}" (oda/write-str (java.util.Map/of "a" 1))))
+  (is (= "[1,2]" (oda/write-str (java.util.List/of 1 2))))
+  (is (thrown? IllegalArgumentException (oda/write-str (Object.))))
+  (is (thrown? IllegalArgumentException (oda/write-str ##NaN)))
+  (is (thrown? IllegalArgumentException (oda/write-str ##Inf)))
+  (is (thrown? IllegalArgumentException (oda/write-str {[1] "bad key"})))
+  (is (= "\"x\"" (oda/write-str (Object.) {:default-fn (constantly "x")})))
+  (let [u (random-uuid)]
+    (is (= (str "\"" u "\"") (oda/write-str u))))
+  (let [out (java.io.ByteArrayOutputStream.)]
+    (oda/write {:a [1 2]} out)
+    (is (= "{\"a\":[1,2]}" (String. (.toByteArray out) "UTF-8"))))
+  (is (= {:a [1 2]} (oda/parse (oda/write-bytes {:a [1 2]})))))
+
+(deftest writer-lone-surrogate
+  ;; lone surrogates cannot be encoded as UTF-8; we emit U+FFFD
+  (is (= "\"�\"" (oda/write-str (String. (char-array [(char 0xD800)]))))))
+
+(def gen-json-kw
+  (gen/recursive-gen
+   (fn [inner]
+     (gen/one-of [(gen/vector inner)
+                  (gen/map (gen/fmap keyword gen/string) inner)]))
+   gen-scalar))
+
+(defspec write-parse-round-trip-strings 500
+  (prop/for-all [v gen-json]
+                (= v (oda/parse (oda/write-bytes v) {:keywordize false}))))
+
+(defspec write-parse-round-trip-keywords 500
+  (prop/for-all [v gen-json-kw]
+                (= v (oda/parse (oda/write-bytes v)))))
+
+(defspec write-differential-jsonista-reads-ours 300
+  (prop/for-all [v gen-json]
+                (= v (j/read-value (oda/write-bytes v)))))
+
+(deftest corpus-round-trip
+  (doseq [^java.io.File f (suite-files)
+          :let [n (.getName f)]
+          :when (.startsWith n "y_")
+          :let [v (parse-bytes (Files/readAllBytes (.toPath f)) {:keywordize false})]]
+    (testing n
+      (is (= v (oda/parse (oda/write-bytes v) {:keywordize false})) n))))

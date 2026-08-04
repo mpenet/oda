@@ -59,10 +59,33 @@
                    :jsonista-str (mean-us #(j/read-value bs))}]))
         (payloads)))
 
-(defn -main [& _]
-  (doseq [[payload r] (compare-all)]
-    (printf "%-14s oda-kw %9.1fµs  jsonista-kw %9.1fµs (%.2fx)   oda-str %9.1fµs  jsonista-str %9.1fµs (%.2fx)%n"
+(defn write-compare-all
+  "Same shape as `compare-all` but for the write side: parses each payload in
+  both key modes, then benches serializing it back to bytes."
+  []
+  (into (sorted-map)
+        (map (fn [[k ^bytes bs]]
+               (let [vkw (oda/parse bs)
+                     vstr (oda/parse bs {:keywordize false})]
+                 [k {:oda-kw (mean-us #(oda/write-bytes vkw))
+                     :jsonista-kw (mean-us #(j/write-value-as-bytes vkw))
+                     :oda-str (mean-us #(oda/write-bytes vstr))
+                     :jsonista-str (mean-us #(j/write-value-as-bytes vstr))}])))
+        (payloads)))
+
+(defn- print-table [results]
+  (doseq [[payload r] results]
+    (printf "%-16s oda-kw %9.1fµs  jsonista-kw %9.1fµs (%.2fx)   oda-str %9.1fµs  jsonista-str %9.1fµs (%.2fx)%n"
             (name payload)
             (:oda-kw r) (:jsonista-kw r) (/ (:jsonista-kw r) (:oda-kw r))
             (:oda-str r) (:jsonista-str r) (/ (:jsonista-str r) (:oda-str r)))
     (flush)))
+
+(defn -main [& [mode]]
+  (case mode
+    "write" (print-table (write-compare-all))
+    "read" (print-table (compare-all))
+    (do (println "=== read ===")
+        (print-table (compare-all))
+        (println "=== write ===")
+        (print-table (write-compare-all)))))

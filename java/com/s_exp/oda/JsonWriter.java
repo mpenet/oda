@@ -1,0 +1,431 @@
+package com.s_exp.oda;
+
+import clojure.lang.BigInt;
+import clojure.lang.IFn;
+import clojure.lang.IMapEntry;
+import clojure.lang.IPersistentMap;
+import clojure.lang.Keyword;
+import clojure.lang.Ratio;
+import clojure.lang.Symbol;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * JSON writer building UTF-8 bytes directly from Clojure data structures.
+ * Single monomorphic implementation: traversal and encoding are fused, type
+ * dispatch is a flat instanceof chain (no per-type serializer lookup).
+ */
+public final class JsonWriter {
+
+    private static final ThreadLocal<JsonWriter> WRITER = ThreadLocal.withInitial(JsonWriter::new);
+
+    private static final byte[] NULL_BYTES = {'n', 'u', 'l', 'l'};
+    private static final byte[] TRUE_BYTES = {'t', 'r', 'u', 'e'};
+    private static final byte[] FALSE_BYTES = {'f', 'a', 'l', 's', 'e'};
+    private static final byte[] LONG_MIN_BYTES = "-9223372036854775808".getBytes(StandardCharsets.ISO_8859_1);
+
+    /**
+     * Escape action per ASCII char: 0 = write raw, 'u' = \\u00XX escape,
+     * otherwise the char to emit after the backslash.
+     */
+    private static final byte[] ESCAPE = new byte[128];
+
+    /** "00".."99" for pair-at-a-time long rendering. */
+    private static final byte[] DIGIT_PAIRS = new byte[200];
+
+    private static final byte[] HEX_DIGITS = "0123456789abcdef".getBytes(StandardCharsets.ISO_8859_1);
+
+    static {
+        for (int i = 0; i < 0x20; i++) {
+            ESCAPE[i] = 'u';
+        }
+        ESCAPE['"'] = '"';
+        ESCAPE['\\'] = '\\';
+        ESCAPE['\b'] = 'b';
+        ESCAPE['\t'] = 't';
+        ESCAPE['\n'] = 'n';
+        ESCAPE['\f'] = 'f';
+        ESCAPE['\r'] = 'r';
+        for (int i = 0; i < 100; i++) {
+            DIGIT_PAIRS[i * 2] = (byte) ('0' + i / 10);
+            DIGIT_PAIRS[i * 2 + 1] = (byte) ('0' + i % 10);
+        }
+    }
+
+    private byte[] buf = new byte[1024];
+    private int n;
+    private boolean inUse;
+    private IFn defaultFn;
+    private final KeywordWriteCache keywords = new KeywordWriteCache();
+    private final StringKeyWriteCache stringKeys = new StringKeyWriteCache();
+
+    // ------------------------------------------------------------ public API
+
+    public static String writeString(Object x, IFn defaultFn) {
+        JsonWriter w = acquire(defaultFn);
+        try {
+            w.writeValue(x);
+            return new String(w.buf, 0, w.n, StandardCharsets.UTF_8);
+        } finally {
+            w.release();
+        }
+    }
+
+    public static byte[] writeBytes(Object x, IFn defaultFn) {
+        JsonWriter w = acquire(defaultFn);
+        try {
+            w.writeValue(x);
+            return Arrays.copyOf(w.buf, w.n);
+        } finally {
+            w.release();
+        }
+    }
+
+    public static void writeStream(Object x, IFn defaultFn, OutputStream out) throws IOException {
+        JsonWriter w = acquire(defaultFn);
+        try {
+            w.writeValue(x);
+            out.write(w.buf, 0, w.n);
+            out.flush();
+        } finally {
+            w.release();
+        }
+    }
+
+    private static JsonWriter acquire(IFn defaultFn) {
+        JsonWriter w = WRITER.get();
+        if (w.inUse) {
+            w = new JsonWriter(); // reentrant call (e.g. from a defaultFn)
+        }
+        w.inUse = true;
+        w.defaultFn = defaultFn;
+        w.n = 0;
+        return w;
+    }
+
+    private void release() {
+        inUse = false;
+        defaultFn = null;
+        if (buf.length > (1 << 23)) {
+            buf = new byte[1 << 16]; // don't pin a giant buffer to the thread
+        }
+    }
+
+    // -------------------------------------------------------------- dispatch
+
+    private void writeValue(Object x) {
+        if (x == null) {
+            writeRaw(NULL_BYTES);
+        } else if (x instanceof String s) {
+            writeJsonString(s);
+        } else if (x instanceof Long l) {
+            writeLong(l);
+        } else if (x instanceof Double d) {
+            writeDouble(d);
+        } else if (x instanceof Keyword k) {
+            writeJsonString(k.sym.toString());
+        } else if (x instanceof Boolean b) {
+            writeRaw(b ? TRUE_BYTES : FALSE_BYTES);
+        } else if (x instanceof IPersistentMap m) {
+            writeMap(m);
+        } else if (x instanceof Integer i) {
+            writeLong(i.longValue());
+        } else if (x instanceof BigDecimal bd) {
+            writeRawAscii(bd.toString());
+        } else if (x instanceof BigInteger bi) {
+            writeRawAscii(bi.toString());
+        } else if (x instanceof BigInt bi) {
+            writeRawAscii(bi.toString());
+        } else if (x instanceof Float f) {
+            float fv = f;
+            if (Float.isNaN(fv) || Float.isInfinite(fv)) {
+                throw new IllegalArgumentException("JSON cannot represent " + fv);
+            }
+            writeRawAscii(Float.toString(fv));
+        } else if (x instanceof Short || x instanceof Byte) {
+            writeLong(((Number) x).longValue());
+        } else if (x instanceof Ratio r) {
+            writeDouble(r.doubleValue());
+        } else if (x instanceof Number num) {
+            writeDouble(num.doubleValue());
+        } else if (x instanceof CharSequence cs) {
+            writeJsonString(cs.toString());
+        } else if (x instanceof Character c) {
+            writeJsonString(String.valueOf(c));
+        } else if (x instanceof UUID u) {
+            writeJsonString(u.toString());
+        } else if (x instanceof Symbol sym) {
+            writeJsonString(sym.toString());
+        } else if (x instanceof Map<?, ?> jm) {
+            writeJavaMap(jm);
+        } else if (x instanceof Iterable<?> it) {
+            writeIterable(it);
+        } else if (defaultFn != null) {
+            writeValue(defaultFn.invoke(x));
+        } else {
+            throw new IllegalArgumentException("Cannot write value of type " + x.getClass().getName());
+        }
+    }
+
+    // ------------------------------------------------------------ structures
+
+    private void writeMap(IPersistentMap m) {
+        ensure(2);
+        buf[n++] = '{';
+        boolean first = true;
+        for (Object o : (Iterable<?>) m) {
+            IMapEntry e = (IMapEntry) o;
+            if (!first) {
+                ensure(1);
+                buf[n++] = ',';
+            }
+            first = false;
+            writeKey(e.key());
+            writeValue(e.val());
+        }
+        ensure(1);
+        buf[n++] = '}';
+    }
+
+    private void writeJavaMap(Map<?, ?> m) {
+        ensure(2);
+        buf[n++] = '{';
+        boolean first = true;
+        for (Map.Entry<?, ?> e : m.entrySet()) {
+            if (!first) {
+                ensure(1);
+                buf[n++] = ',';
+            }
+            first = false;
+            writeKey(e.getKey());
+            writeValue(e.getValue());
+        }
+        ensure(1);
+        buf[n++] = '}';
+    }
+
+    private void writeKey(Object k) {
+        if (k instanceof Keyword kw) {
+            writeRaw(keywords.fragment(kw));
+        } else if (k instanceof String s) {
+            byte[] frag = stringKeys.fragment(s);
+            if (frag != null) {
+                writeRaw(frag);
+            } else {
+                writeJsonString(s);
+                ensure(1);
+                buf[n++] = ':';
+            }
+        } else if (k instanceof Symbol sym) {
+            writeJsonString(sym.toString());
+            ensure(1);
+            buf[n++] = ':';
+        } else if (k instanceof Number) {
+            ensure(1);
+            buf[n++] = '"';
+            writeValue(k);
+            ensure(2);
+            buf[n++] = '"';
+            buf[n++] = ':';
+        } else {
+            throw new IllegalArgumentException(
+                    "Cannot write map key of type " + (k == null ? "nil" : k.getClass().getName()));
+        }
+    }
+
+    private void writeIterable(Iterable<?> it) {
+        ensure(2);
+        buf[n++] = '[';
+        boolean first = true;
+        for (Object o : it) {
+            if (!first) {
+                ensure(1);
+                buf[n++] = ',';
+            }
+            first = false;
+            writeValue(o);
+        }
+        ensure(1);
+        buf[n++] = ']';
+    }
+
+    // --------------------------------------------------------------- strings
+
+    private char[] cscratch = new char[256];
+
+    private void writeJsonString(String s) {
+        int len = s.length();
+        if (len > cscratch.length) {
+            cscratch = new char[Math.max(len, cscratch.length << 1)];
+        }
+        char[] cs = cscratch;
+        s.getChars(0, len, cs, 0);
+        // worst case 6 bytes per char (\ u00XX); paying it upfront removes
+        // all capacity checks from the loop
+        ensure(6 * len + 2);
+        byte[] b = buf;
+        int p = n;
+        b[p++] = '"';
+        int i = 0;
+        while (i < len) {
+            char c = cs[i];
+            if (c < 0x80) {
+                byte esc = ESCAPE[c];
+                if (esc == 0) {
+                    b[p++] = (byte) c;
+                } else if (esc == 'u') {
+                    b[p++] = '\\';
+                    b[p++] = 'u';
+                    b[p++] = '0';
+                    b[p++] = '0';
+                    b[p++] = HEX_DIGITS[(c >> 4) & 0xf];
+                    b[p++] = HEX_DIGITS[c & 0xf];
+                } else {
+                    b[p++] = '\\';
+                    b[p++] = esc;
+                }
+                i++;
+            } else if (c < 0x800) {
+                b[p++] = (byte) (0xC0 | (c >> 6));
+                b[p++] = (byte) (0x80 | (c & 0x3F));
+                i++;
+            } else if (c >= 0xD800 && c <= 0xDFFF) {
+                // surrogate: valid pair -> 4-byte UTF-8, lone -> U+FFFD
+                if (c <= 0xDBFF && i + 1 < len) {
+                    char c2 = cs[i + 1];
+                    if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+                        int cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+                        b[p++] = (byte) (0xF0 | (cp >> 18));
+                        b[p++] = (byte) (0x80 | ((cp >> 12) & 0x3F));
+                        b[p++] = (byte) (0x80 | ((cp >> 6) & 0x3F));
+                        b[p++] = (byte) (0x80 | (cp & 0x3F));
+                        i += 2;
+                        continue;
+                    }
+                }
+                b[p++] = (byte) 0xEF;
+                b[p++] = (byte) 0xBF;
+                b[p++] = (byte) 0xBD;
+                i++;
+            } else {
+                b[p++] = (byte) (0xE0 | (c >> 12));
+                b[p++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+                b[p++] = (byte) (0x80 | (c & 0x3F));
+                i++;
+            }
+        }
+        b[p++] = '"';
+        n = p;
+    }
+
+    /** Builds the pre-escaped {@code "key":} fragment for the keyword cache. */
+    static byte[] escapedKeyFragment(String s) {
+        JsonWriter w = new JsonWriter();
+        w.writeJsonString(s);
+        w.ensure(1);
+        w.buf[w.n++] = ':';
+        return Arrays.copyOf(w.buf, w.n);
+    }
+
+    // --------------------------------------------------------------- numbers
+
+    private void writeLong(long v) {
+        if (v == Long.MIN_VALUE) {
+            writeRaw(LONG_MIN_BYTES);
+            return;
+        }
+        ensure(20);
+        byte[] b = buf;
+        int p = n;
+        if (v < 0) {
+            b[p++] = '-';
+            v = -v;
+        }
+        int digits = digitCount(v);
+        int end = p + digits;
+        int i = end;
+        while (v >= 100) {
+            int r = (int) (v % 100);
+            v /= 100;
+            i -= 2;
+            b[i] = DIGIT_PAIRS[r * 2];
+            b[i + 1] = DIGIT_PAIRS[r * 2 + 1];
+        }
+        if (v < 10) {
+            b[--i] = (byte) ('0' + v);
+        } else {
+            i -= 2;
+            b[i] = DIGIT_PAIRS[(int) v * 2];
+            b[i + 1] = DIGIT_PAIRS[(int) v * 2 + 1];
+        }
+        n = end;
+    }
+
+    private static int digitCount(long v) {
+        int d = 1;
+        if (v >= 10000000000000000L) {
+            d += 16;
+            v /= 10000000000000000L;
+        }
+        if (v >= 100000000) {
+            d += 8;
+            v /= 100000000;
+        }
+        if (v >= 10000) {
+            d += 4;
+            v /= 10000;
+        }
+        if (v >= 100) {
+            d += 2;
+            v /= 100;
+        }
+        if (v >= 10) {
+            d += 1;
+        }
+        return d;
+    }
+
+    private void writeDouble(double d) {
+        if (Double.isNaN(d) || Double.isInfinite(d)) {
+            throw new IllegalArgumentException("JSON cannot represent " + d);
+        }
+        // JDK 19+ Double.toString is Schubfach-based: shortest repr, correct
+        writeRawAscii(Double.toString(d));
+    }
+
+    // ------------------------------------------------------------------ misc
+
+    private void writeRaw(byte[] bytes) {
+        ensure(bytes.length);
+        System.arraycopy(bytes, 0, buf, n, bytes.length);
+        n += bytes.length;
+    }
+
+    private void writeRawAscii(String s) {
+        int len = s.length();
+        ensure(len);
+        byte[] b = buf;
+        int p = n;
+        for (int i = 0; i < len; i++) {
+            b[p + i] = (byte) s.charAt(i);
+        }
+        n = p + len;
+    }
+
+    private void ensure(int k) {
+        if (n + k > buf.length) {
+            grow(n + k);
+        }
+    }
+
+    private void grow(int min) {
+        buf = Arrays.copyOf(buf, Math.max(min, buf.length << 1));
+    }
+}

@@ -1,7 +1,8 @@
 (ns s-exp.oda
-  "Fast JSON parser building Clojure data structures directly from UTF-8 bytes."
-  (:import (com.s_exp.oda JsonParser)
-           (java.io InputStream)
+  "Fast JSON parser/writer working directly on UTF-8 bytes."
+  (:import (clojure.lang IFn)
+           (com.s_exp.oda JsonParser JsonWriter)
+           (java.io InputStream OutputStream)
            (java.nio.charset StandardCharsets)))
 
 (set! *warn-on-reflection* true)
@@ -26,3 +27,29 @@
                      :else (throw (IllegalArgumentException.
                                    (str "Unsupported input type: " (some-> input class .getName)))))]
      (JsonParser/parse bs 0 (alength bs) (boolean keywordize) (int max-depth)))))
+
+(defn write-str
+  "Writes `x` as a JSON String.
+
+  Options:
+  * `:default-fn` - called on values of unsupported types, must return a
+    writable value. Without it, unsupported types throw."
+  (^String [x]
+   (JsonWriter/writeString x nil))
+  (^String [x {:keys [default-fn]}]
+   (JsonWriter/writeString x ^IFn default-fn)))
+
+(defn write-bytes
+  "Writes `x` as JSON UTF-8 encoded byte-array. See `write-str` for options."
+  (^bytes [x]
+   (JsonWriter/writeBytes x nil))
+  (^bytes [x {:keys [default-fn]}]
+   (JsonWriter/writeBytes x ^IFn default-fn)))
+
+(defn write
+  "Writes `x` as JSON to `out` (OutputStream), flushes, does not close.
+  See `write-str` for options."
+  ([x ^OutputStream out]
+   (JsonWriter/writeStream x nil out))
+  ([x ^OutputStream out {:keys [default-fn]}]
+   (JsonWriter/writeStream x ^IFn default-fn out)))

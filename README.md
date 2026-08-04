@@ -67,25 +67,29 @@ JVM numbers (Ratio written as double), booleans, nil. NaN/Infinity throw.
 
 ## Performance
 
-Criterium means, Apple M-series, JDK 25, Vector API enabled, vs jsonista
-(Jackson). Keyword keys:
+Criterium means, Apple M-series, JDK 25, default (scalar) configuration,
+vs jsonista (Jackson). Keyword keys:
 
 | payload | read | write |
 |---|---|---|
 | number-heavy | **2.4x** | 1.3x |
-| citm_catalog | **1.6x** | **2.3x** |
-| small objects, repeated keys | **1.4x** | 1.3x |
-| string-heavy (raw UTF-8) | **1.5x** | 1.0x |
-| string-heavy (\uXXXX escapes) | **1.1x** | 1.0x |
-| twitter.json | **1.1x** | **2.1x** |
+| citm_catalog | **1.7x** | **2.4x** |
+| small objects, repeated keys | **1.6x** | 1.3x |
+| string-heavy (raw UTF-8) | **1.2x** | 0.9x |
+| string-heavy (\uXXXX escapes) | **1.1x** | 0.9x |
+| twitter.json | **1.2x** | **2.0x** |
 
 Writes allocate nothing beyond the returned array (numbers included, via a
-Ryū port). Run `clj -M:bench:vector -m s-exp.oda.bench` to reproduce.
+Ryū port). Run `clj -M:bench -m s-exp.oda.bench` to reproduce
+(`clj -M:bench:vector` for the SIMD numbers).
 
 ### Optional SIMD
 
-With the (incubating) Vector API enabled, long-string payloads improve
-further (twitter +10%, raw string-heavy +21%):
+With the (incubating) Vector API enabled, string scanning and encoding go
+16 bytes at a time. Measured A/B deltas on the same JVM: raw string-heavy
+read +21%, twitter read +10%, string-heavy writes +5-8%, long pure-ASCII
+string writes ~5x; short-string payloads unaffected (a run-length heuristic
+keeps them on the scalar path). Enable with:
 
 ```shell
 clj -J--add-modules -Jjdk.incubator.vector ...

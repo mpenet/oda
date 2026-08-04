@@ -56,6 +56,33 @@
 (defn- bits= [^double expected ^double actual]
   (= (Double/doubleToLongBits expected) (Double/doubleToLongBits actual)))
 
+(def double-torture-values
+  ["2.2250738585072011e-308"
+   "2.2250738585072014e-308"
+   "4.9e-324" "5e-324"
+   "2.4703282292062327e-324"
+   "2.4703282292062328e-324"
+   "1.7976931348623157e308"
+   "1e308" "1e-308" "1e-322" "1e-324"
+   "7.2057594037927933e16"
+   "1e23" "9007199254740993e0"
+   "3.141592653589793" "2.718281828459045"
+   "-0.0" "0.0" "1.0" "-1.0" "0.1" "1e7" "1e-3" "123456.789"
+   "0.000000000000000000000000000000000000000000001"
+   "1.00000000000000011102230246251565404236316680908203125"
+   "12345678901234567890123456789.012345678901234567890e-15"])
+
+(deftest write-double-torture
+  (doseq [s double-torture-values]
+    (let [d (Double/parseDouble s)]
+      (is (bits= d (oda/parse (oda/write-str d))) s)
+      (is (bits= (- d) (oda/parse (oda/write-str (- d)))) (str "-" s)))))
+
+(defspec write-double-round-trip 5000
+  (prop/for-all [d (gen/double* {:infinite? false :NaN? false})]
+                (= (Double/doubleToLongBits d)
+                   (Double/doubleToLongBits (oda/parse (oda/write-str d))))))
+
 (deftest double-torture
   (doseq [s ["2.2250738585072011e-308"  ; once hung Java's parser
              "2.2250738585072014e-308"  ; MIN_NORMAL

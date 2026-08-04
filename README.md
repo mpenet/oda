@@ -67,21 +67,20 @@ JVM numbers (Ratio written as double), booleans, nil. NaN/Infinity throw.
 
 ## Performance
 
-Criterium means, Apple M-series, JDK 25, vs jsonista (Jackson). Read,
-keyword keys:
+Criterium means, Apple M-series, JDK 25, Vector API enabled, vs jsonista
+(Jackson). Keyword keys:
 
-| payload | oda | jsonista | speedup |
-|---|---|---|---|
-| number-heavy | 144µs | 349µs | 2.4x |
-| citm_catalog | 1889µs | 3066µs | 1.6x |
-| small objects, repeated keys | 374µs | 562µs | 1.5x |
-| string-heavy (raw UTF-8) | 1106µs | 1292µs | 1.2x |
-| string-heavy (\uXXXX escapes) | 1480µs | 1616µs | 1.1x |
-| twitter.json | 1275µs | 1388µs | 1.1x |
+| payload | read | write |
+|---|---|---|
+| number-heavy | **2.4x** | 1.3x |
+| citm_catalog | **1.6x** | **2.3x** |
+| small objects, repeated keys | **1.4x** | 1.3x |
+| string-heavy (raw UTF-8) | **1.5x** | 1.0x |
+| string-heavy (\uXXXX escapes) | **1.1x** | 1.0x |
+| twitter.json | **1.1x** | **2.1x** |
 
-Write is 1.3-1.5x faster than jsonista on the same payloads except
-long-unicode-string documents (~0.9x). Run `clj -M:bench -m s-exp.oda.bench`
-to reproduce.
+Writes allocate nothing beyond the returned array (numbers included, via a
+Ryū port). Run `clj -M:bench:vector -m s-exp.oda.bench` to reproduce.
 
 ### Optional SIMD
 
@@ -124,4 +123,6 @@ Copyright © Max Penet. Distributed under the
 
 `EiselLemire.java` is ported from
 [FastDoubleParser](https://github.com/wrandelshofer/FastDoubleParser),
-Copyright © Werner Randelshofer, MIT License.
+Copyright © Werner Randelshofer, MIT License. `RyuDouble.java` is adapted
+from [ryu](https://github.com/ulfjack/ryu), Copyright © Ulf Adams,
+Apache License 2.0.

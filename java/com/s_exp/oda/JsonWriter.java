@@ -585,8 +585,8 @@ public final class JsonWriter {
         if (Double.isNaN(d) || Double.isInfinite(d)) {
             throw new IllegalArgumentException("JSON cannot represent " + d);
         }
-        // JDK 19+ Double.toString is Schubfach-based: shortest repr, correct
-        writeRawAscii(Double.toString(d));
+        ensure(24);
+        n = RyuDouble.write(buf, n, d);
     }
 
     // ------------------------------------------------------------------ misc

@@ -1,11 +1,15 @@
 # oda
 
+[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/hako.svg)](https://clojars.org/com.s-exp/hako)
+
 Fast JSON parser/writer for Clojure. Zero dependencies, JDK 25+.
 
 oda works directly on UTF-8 bytes and builds Clojure persistent data
-structures without intermediate representations. It is faster than
-Jackson-backed libraries (jsonista, cheshire) across typical workloads, on
-both read and write.
+structures without intermediate representations. It is **faster than
+Jackson-backed libraries** (jsonista, cheshire) across typical workloads, on
+both read and write, with **optional SIMD string scanning via the Vector API**
+(`--add-modules jdk.incubator.vector`) for an extra boost on string-heavy
+documents — see [Optional SIMD](#optional-simd).
 
 > Status: alpha. API may still move.
 
@@ -13,14 +17,11 @@ both read and write.
 
 ```clojure
 ;; deps.edn
-io.github.mpenet/oda {:git/sha "..."}
+com.s-exp/oda {:mvn/version "1.0.0-alphaN"}
 ```
 
-Requires JDK 25+. After fetching, compile the Java core once:
-
-```shell
-clj -T:build javac
-```
+Requires JDK 25+. The jar ships the compiled Java core; when working from a
+git checkout instead, compile it once with `clj -T:build javac`.
 
 ## Usage
 

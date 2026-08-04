@@ -1,5 +1,8 @@
 package com.s_exp.oda;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 
 /**
@@ -48,12 +51,27 @@ final class KeyCache {
         table[hash & (table.length - 1)] = new Entry(Arrays.copyOfRange(buf, off, off + len), key);
     }
 
+    private static final VarHandle LONG_LE =
+            MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+
     static int hash(byte[] b, int off, int len) {
-        int h = 0x811c9dc5;
-        for (int i = off; i < off + len; i++) {
-            h ^= b[i];
-            h *= 0x01000193;
+        long h = 0x9E3779B97F4A7C15L ^ len;
+        int i = off;
+        int stop = off + len;
+        while (stop - i >= 8) {
+            h = (h ^ (long) LONG_LE.get(b, i)) * 0x9E3779B97F4A7C15L;
+            i += 8;
         }
-        return h ^ (h >>> 16);
+        if (i < stop) {
+            long k = 0;
+            for (int shift = 0; i < stop; i++, shift += 8) {
+                k |= (b[i] & 0xFFL) << shift;
+            }
+            h = (h ^ k) * 0x9E3779B97F4A7C15L;
+        }
+        h ^= h >>> 33;
+        h *= 0xFF51AFD7ED558CCDL;
+        h ^= h >>> 33;
+        return (int) h;
     }
 }

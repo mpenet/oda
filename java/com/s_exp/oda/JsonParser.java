@@ -699,11 +699,41 @@ public final class JsonParser {
             byte c = b[p];
             if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
                 p++;
+                // bulk-skip whitespace runs (indentation in pretty-printed
+                // JSON); compact JSON exits on the first check above
+                while (end - p >= 8) {
+                    long w = (long) LONG_LE.get(b, p);
+                    long m = nonWsMask(w);
+                    if (m != 0) {
+                        p += Long.numberOfTrailingZeros(m) >>> 3;
+                        break;
+                    }
+                    p += 8;
+                }
             } else {
                 break;
             }
         }
         pos = p;
+    }
+
+    private static final long SEVEN_F = 0x7F7F7F7F7F7F7F7FL;
+
+    /** Exact per-lane zero test (no inter-lane carries): 0x80 where byte == 0. */
+    private static long zeroMask(long v) {
+        return ~(((v & SEVEN_F) + SEVEN_F) | v | SEVEN_F);
+    }
+
+    /**
+     * 0x80 set in each lane holding a byte that is NOT JSON whitespace.
+     * Must be exact: a false whitespace positive would skip real content.
+     */
+    private static long nonWsMask(long w) {
+        long ws = zeroMask(w ^ 0x2020202020202020L)
+                | zeroMask(w ^ 0x0909090909090909L)
+                | zeroMask(w ^ 0x0A0A0A0A0A0A0A0AL)
+                | zeroMask(w ^ 0x0D0D0D0D0D0D0D0DL);
+        return ~ws & HIGH_BITS;
     }
 
     private Object[] kvBuf(int depth) {

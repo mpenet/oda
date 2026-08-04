@@ -1,11 +1,13 @@
 package com.s_exp.oda;
 
+import clojure.lang.IFn;
 import clojure.lang.ITransientMap;
 import clojure.lang.Keyword;
 import clojure.lang.LazilyPersistentVector;
 import clojure.lang.PersistentArrayMap;
 import clojure.lang.PersistentHashMap;
 import clojure.lang.PersistentVector;
+import clojure.lang.RT;
 import clojure.lang.Util;
 
 import java.lang.invoke.MethodHandles;
@@ -14,6 +16,9 @@ import java.math.BigInteger;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * Recursive-descent JSON parser building Clojure persistent data structures
@@ -25,33 +30,67 @@ public final class JsonParser {
     private static final VarHandle LONG_LE =
             MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
-    private static final ThreadLocal<KeyCache> KEYWORD_CACHE =
-            ThreadLocal.withInitial(() -> new KeyCache(true));
-    private static final ThreadLocal<KeyCache> STRING_CACHE =
-            ThreadLocal.withInitial(() -> new KeyCache(false));
+    private static final int KEY_STRINGS = 0;
+    private static final int KEY_KEYWORDS = 1;
+    private static final int KEY_CUSTOM = 2;
+
+    /** clojure.core/keyword, recognized by identity for the interning fast path. */
+    private static final Object CORE_KEYWORD = RT.var("clojure.core", "keyword").deref();
+
+    /**
+     * Per-fn-instance key tables for custom key fns, keyed by identity.
+     * Requires key fns to be pure. Weak keys: tables of discarded lambdas
+     * get collected; a def'd fn keeps its table and gets cross-parse
+     * caching like the built-in modes.
+     */
+    private static final Map<IFn, KeyCache.Entry[]> CUSTOM_TABLES =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     private final byte[] buf;
     private final int end;
-    private final boolean keywordize;
+    private final int keyMode;
+    private final IFn keyFn;
+    private final KeyCache.Entry[] keyTable;
     private final int maxDepth;
-    private final KeyCache keys;
     private int pos;
 
     private char[] cbuf = new char[64];
     private Object[][] kvBufs = new Object[16][];
     private Object[][] valBufs = new Object[16][];
 
-    private JsonParser(byte[] buf, int offset, int length, boolean keywordize, int maxDepth) {
+    private JsonParser(byte[] buf, int offset, int length, IFn keyFn, int maxDepth) {
         this.buf = buf;
         this.pos = offset;
         this.end = offset + length;
-        this.keywordize = keywordize;
         this.maxDepth = maxDepth;
-        this.keys = keywordize ? KEYWORD_CACHE.get() : STRING_CACHE.get();
+        if (keyFn == null) {
+            this.keyMode = KEY_STRINGS;
+            this.keyTable = KeyCache.STRINGS;
+            this.keyFn = null;
+        } else if (keyFn == CORE_KEYWORD) {
+            this.keyMode = KEY_KEYWORDS;
+            this.keyTable = KeyCache.KEYWORDS;
+            this.keyFn = null;
+        } else if (keyFn instanceof Keyword) {
+            // a keyword invoked as key-fn would silently produce nil keys
+            throw new IllegalArgumentException(
+                    "key-fn must be a fn of String -> key, got keyword: " + keyFn);
+        } else {
+            this.keyMode = KEY_CUSTOM;
+            this.keyTable = CUSTOM_TABLES.computeIfAbsent(keyFn,
+                    f -> new KeyCache.Entry[KeyCache.CUSTOM_SIZE]);
+            this.keyFn = keyFn;
+        }
     }
 
-    public static Object parse(byte[] buf, int offset, int length, boolean keywordize, int maxDepth) {
-        JsonParser p = new JsonParser(buf, offset, length, keywordize, maxDepth);
+    /**
+     * Parses the given UTF-8 span. keyFn transforms object keys: null leaves
+     * them as Strings, clojure.core/keyword (recognized by identity) interns
+     * them as Keywords without invoking the fn, any other fn is invoked with
+     * the key String on cache misses (and must therefore be pure).
+     */
+    public static Object parse(byte[] buf, int offset, int length, IFn keyFn, int maxDepth) {
+        JsonParser p = new JsonParser(buf, offset, length, keyFn, maxDepth);
         p.skipWs();
         Object v = p.parseValue(0);
         p.skipWs();
@@ -187,7 +226,13 @@ public final class JsonParser {
             if (c == '"') {
                 if (high == 0) {
                     pos = p + 1;
-                    return keys.intern(b, start, p - start);
+                    int len = p - start;
+                    int h = KeyCache.hash(b, start, len);
+                    Object k = KeyCache.lookup(keyTable, b, start, len, h);
+                    if (k != null) {
+                        return k;
+                    }
+                    return missKey(b, start, len, h);
                 }
                 // non-ASCII key: rare, take the String path (pos untouched)
                 return finishKeySlow();
@@ -203,9 +248,23 @@ public final class JsonParser {
         }
     }
 
+    private Object missKey(byte[] b, int start, int len, int h) {
+        String s = new String(b, start, len, StandardCharsets.ISO_8859_1);
+        Object k = keyFor(s);
+        KeyCache.store(keyTable, b, start, len, h, k);
+        return k;
+    }
+
     private Object finishKeySlow() {
-        String s = parseString();
-        return keywordize ? Keyword.intern(s) : s;
+        return keyFor(parseString());
+    }
+
+    private Object keyFor(String s) {
+        return switch (keyMode) {
+            case KEY_KEYWORDS -> Keyword.intern(s);
+            case KEY_STRINGS -> s;
+            default -> keyFn.invoke(s);
+        };
     }
 
     // ----------------------------------------------------------------- arrays

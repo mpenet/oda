@@ -12,21 +12,25 @@
   data structures.
 
   Options:
-  * `:keywordize` - convert object keys to keywords (default true)
-  * `:max-depth`  - maximum nesting depth (default 1000)
+  * `:key-fn`    - fn of String -> map key, applied to object keys. Unset or
+    nil leaves keys as strings. `clojure.core/keyword` is recognized and uses
+    an optimized interning path. Must be pure: results are cached by fn
+    identity, so a def'd fn gets cross-parse caching while a fresh lambda is
+    only cached within a single parse
+  * `:max-depth` - maximum nesting depth (default 1000)
 
   Throws `com.s_exp.oda.JsonParseException` on invalid input."
   ([input]
    (parse input nil))
-  ([input {:keys [keywordize max-depth]
-           :or {keywordize true max-depth 1000}}]
+  ([input {:keys [key-fn max-depth]
+           :or {max-depth 1000}}]
    (let [^bytes bs (cond
                      (bytes? input) input
                      (string? input) (.getBytes ^String input StandardCharsets/UTF_8)
                      (instance? InputStream input) (.readAllBytes ^InputStream input)
                      :else (throw (IllegalArgumentException.
                                    (str "Unsupported input type: " (some-> input class .getName)))))]
-     (JsonParser/parse bs 0 (alength bs) (boolean keywordize) (int max-depth)))))
+     (JsonParser/parse bs 0 (alength bs) ^IFn key-fn (int max-depth)))))
 
 (defn write-str
   "Writes `x` as a JSON String.

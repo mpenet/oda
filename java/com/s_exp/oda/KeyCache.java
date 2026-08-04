@@ -1,85 +1,54 @@
 package com.s_exp.oda;
 
-import clojure.lang.Keyword;
-
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 /**
- * Open-addressing cache from raw ASCII byte spans to interned key objects
- * (Keyword or String depending on mode). Avoids materializing a String per
- * key on the hot path. Bounded to MAX_ENTRIES to prevent adversarial blowup;
- * past that, misses fall through to plain interning without caching.
+ * Fixed-size, lossy canonicalization caches from raw ASCII key byte spans to
+ * key objects. One-way associative: a colliding insert overwrites the slot.
+ *
+ * Entries are immutable, so racy unsynchronized reads are safe (final-field
+ * publication guarantees no torn entry); a racy write at worst drops a cached
+ * entry. No locks, no growth, hard global memory bound — safe with thread
+ * pools and virtual threads, unlike thread-local caches.
  */
 final class KeyCache {
-    private static final int MAX_ENTRIES = 4096;
 
-    private final boolean keyword;
-    private byte[][] keys = new byte[1024][];
-    private Object[] vals = new Object[1024];
-    private int size;
+    static final class Entry {
+        final byte[] bytes;
+        final Object key;
 
-    KeyCache(boolean keyword) {
-        this.keyword = keyword;
+        Entry(byte[] bytes, Object key) {
+            this.bytes = bytes;
+            this.key = key;
+        }
     }
 
-    Object intern(byte[] buf, int off, int len) {
-        byte[][] ks = keys;
-        int mask = ks.length - 1;
-        int i = hash(buf, off, len) & mask;
-        while (true) {
-            byte[] k = ks[i];
-            if (k == null) {
-                break;
-            }
-            if (k.length == len && Arrays.equals(k, 0, len, buf, off, off + len)) {
-                return vals[i];
-            }
-            i = (i + 1) & mask;
-        }
-        String s = new String(buf, off, len, StandardCharsets.ISO_8859_1);
-        Object v = keyword ? Keyword.intern(s) : s;
-        if (size < MAX_ENTRIES) {
-            if ((size + 1) * 2 > ks.length) {
-                rehash();
-                ks = keys;
-                mask = ks.length - 1;
-                i = hash(buf, off, len) & mask;
-                while (ks[i] != null) {
-                    i = (i + 1) & mask;
-                }
-            }
-            ks[i] = Arrays.copyOfRange(buf, off, off + len);
-            vals[i] = v;
-            size++;
-        }
-        return v;
+    private static final int GLOBAL_SIZE = 8192;
+
+    /** Shared tables for the two canonical key modes. */
+    static final Entry[] KEYWORDS = new Entry[GLOBAL_SIZE];
+    static final Entry[] STRINGS = new Entry[GLOBAL_SIZE];
+
+    /** Size of the per-parse table used with a custom key-fn. */
+    static final int CUSTOM_SIZE = 512;
+
+    private KeyCache() {
     }
 
-    private void rehash() {
-        byte[][] oldKeys = keys;
-        Object[] oldVals = vals;
-        int cap = oldKeys.length << 1;
-        byte[][] newKeys = new byte[cap][];
-        Object[] newVals = new Object[cap];
-        int mask = cap - 1;
-        for (int i = 0; i < oldKeys.length; i++) {
-            byte[] k = oldKeys[i];
-            if (k == null) {
-                continue;
-            }
-            int j = hash(k, 0, k.length) & mask;
-            while (newKeys[j] != null) {
-                j = (j + 1) & mask;
-            }
-            newKeys[j] = k;
-            newVals[j] = oldVals[i];
+    static Object lookup(Entry[] table, byte[] buf, int off, int len, int hash) {
+        Entry e = table[hash & (table.length - 1)];
+        if (e != null && e.bytes.length == len
+                && Arrays.equals(e.bytes, 0, len, buf, off, off + len)) {
+            return e.key;
         }
-        keys = newKeys;
-        vals = newVals;
+        return null;
     }
 
-    private static int hash(byte[] b, int off, int len) {
+    static void store(Entry[] table, byte[] buf, int off, int len, int hash, Object key) {
+        table[hash & (table.length - 1)] = new Entry(Arrays.copyOfRange(buf, off, off + len), key);
+    }
+
+    static int hash(byte[] b, int off, int len) {
         int h = 0x811c9dc5;
         for (int i = off; i < off + len; i++) {
             h ^= b[i];

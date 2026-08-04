@@ -16,6 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * JSON writer building UTF-8 bytes directly from Clojure data structures.
@@ -24,7 +26,9 @@ import java.util.UUID;
  */
 public final class JsonWriter {
 
-    private static final ThreadLocal<JsonWriter> WRITER = ThreadLocal.withInitial(JsonWriter::new);
+    private static final ConcurrentLinkedQueue<JsonWriter> POOL = new ConcurrentLinkedQueue<>();
+    private static final AtomicInteger POOL_SIZE = new AtomicInteger();
+    private static final int MAX_POOLED = 8;
 
     private static final byte[] NULL_BYTES = {'n', 'u', 'l', 'l'};
     private static final byte[] TRUE_BYTES = {'t', 'r', 'u', 'e'};
@@ -61,10 +65,7 @@ public final class JsonWriter {
 
     private byte[] buf = new byte[1024];
     private int n;
-    private boolean inUse;
     private IFn defaultFn;
-    private final KeywordWriteCache keywords = new KeywordWriteCache();
-    private final StringKeyWriteCache stringKeys = new StringKeyWriteCache();
 
     // ------------------------------------------------------------ public API
 
@@ -100,21 +101,29 @@ public final class JsonWriter {
     }
 
     private static JsonWriter acquire(IFn defaultFn) {
-        JsonWriter w = WRITER.get();
-        if (w.inUse) {
-            w = new JsonWriter(); // reentrant call (e.g. from a defaultFn)
+        JsonWriter w = POOL.poll();
+        if (w == null) {
+            w = new JsonWriter();
+        } else {
+            POOL_SIZE.decrementAndGet();
         }
-        w.inUse = true;
         w.defaultFn = defaultFn;
         w.n = 0;
         return w;
     }
 
     private void release() {
-        inUse = false;
         defaultFn = null;
+        // don't pin giant scratch buffers in the pool
         if (buf.length > (1 << 23)) {
-            buf = new byte[1 << 16]; // don't pin a giant buffer to the thread
+            buf = new byte[1 << 16];
+        }
+        if (cscratch.length > (1 << 20)) {
+            cscratch = new char[256];
+        }
+        if (POOL_SIZE.get() < MAX_POOLED) {
+            POOL_SIZE.incrementAndGet();
+            POOL.offer(this);
         }
     }
 
@@ -211,18 +220,59 @@ public final class JsonWriter {
         buf[n++] = '}';
     }
 
+    /**
+     * Fixed-size lossy caches from map keys to their pre-escaped
+     * {@code "key":} fragment; same benign-race design as {@link KeyCache}.
+     * Keywords are interned so identity comparison suffices; strings need
+     * equals and skip caching for long keys to bound retained memory.
+     */
+    private record KwFrag(Keyword kw, byte[] frag) {
+    }
+
+    private record StrFrag(String key, byte[] frag) {
+    }
+
+    private static final int FRAG_MASK = 8191;
+    private static final KwFrag[] KW_FRAGS = new KwFrag[FRAG_MASK + 1];
+    private static final StrFrag[] STR_FRAGS = new StrFrag[FRAG_MASK + 1];
+    private static final int MAX_CACHED_KEY_LENGTH = 64;
+
+    private void writeKeywordKey(Keyword kw) {
+        int i = kw.hashCode() & FRAG_MASK;
+        KwFrag e = KW_FRAGS[i];
+        if (e != null && e.kw() == kw) {
+            writeRaw(e.frag());
+            return;
+        }
+        byte[] frag = escapedKeyFragment(kw.sym.toString());
+        KW_FRAGS[i] = new KwFrag(kw, frag);
+        writeRaw(frag);
+    }
+
+    private void writeStringKey(String s) {
+        if (s.length() > MAX_CACHED_KEY_LENGTH) {
+            writeJsonString(s);
+            ensure(1);
+            buf[n++] = ':';
+            return;
+        }
+        int h = s.hashCode();
+        int i = (h ^ (h >>> 16)) & FRAG_MASK;
+        StrFrag e = STR_FRAGS[i];
+        if (e != null && e.key().equals(s)) {
+            writeRaw(e.frag());
+            return;
+        }
+        byte[] frag = escapedKeyFragment(s);
+        STR_FRAGS[i] = new StrFrag(s, frag);
+        writeRaw(frag);
+    }
+
     private void writeKey(Object k) {
         if (k instanceof Keyword kw) {
-            writeRaw(keywords.fragment(kw));
+            writeKeywordKey(kw);
         } else if (k instanceof String s) {
-            byte[] frag = stringKeys.fragment(s);
-            if (frag != null) {
-                writeRaw(frag);
-            } else {
-                writeJsonString(s);
-                ensure(1);
-                buf[n++] = ':';
-            }
+            writeStringKey(s);
         } else if (k instanceof Symbol sym) {
             writeJsonString(sym.toString());
             ensure(1);

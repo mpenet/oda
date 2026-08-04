@@ -53,9 +53,9 @@
   []
   (into (sorted-map)
         (map (fn [[k ^bytes bs]]
-               [k {:oda-kw (mean-us #(oda/parse bs))
+               [k {:oda-kw (mean-us #(oda/parse bs {:key-fn keyword}))
                    :jsonista-kw (mean-us #(j/read-value bs j/keyword-keys-object-mapper))
-                   :oda-str (mean-us #(oda/parse bs {:keywordize false}))
+                   :oda-str (mean-us #(oda/parse bs))
                    :jsonista-str (mean-us #(j/read-value bs))}]))
         (payloads)))
 
@@ -65,8 +65,8 @@
   []
   (into (sorted-map)
         (map (fn [[k ^bytes bs]]
-               (let [vkw (oda/parse bs)
-                     vstr (oda/parse bs {:keywordize false})]
+               (let [vkw (oda/parse bs {:key-fn keyword})
+                     vstr (oda/parse bs)]
                  [k {:oda-kw (mean-us #(oda/write-bytes vkw))
                      :jsonista-kw (mean-us #(j/write-value-as-bytes vkw))
                      :oda-str (mean-us #(oda/write-bytes vstr))

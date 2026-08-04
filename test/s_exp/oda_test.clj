@@ -20,8 +20,11 @@
 ;; ---------------------------------------------------------------- unit tests
 
 (deftest basic-values
-  (is (= {:a 1 :b [1.5 true nil "x"]} (oda/parse "{\"a\":1,\"b\":[1.5,true,null,\"x\"]}")))
-  (is (= {"a" 1} (oda/parse "{\"a\":1}" {:keywordize false})))
+  ;; default (no key-fn) leaves keys as strings
+  (is (= {"a" 1 "b" [1.5 true nil "x"]} (oda/parse "{\"a\":1,\"b\":[1.5,true,null,\"x\"]}")))
+  (is (= {:a 1 :b [1.5 true nil "x"]}
+         (oda/parse "{\"a\":1,\"b\":[1.5,true,null,\"x\"]}" {:key-fn keyword})))
+  (is (= {"a" 1} (oda/parse "{\"a\":1}")))
   (is (= [] (oda/parse "[]")))
   (is (= {} (oda/parse "{}")))
   (is (nil? (oda/parse "null")))
@@ -33,9 +36,9 @@
 
 (deftest input-types
   (let [s "{\"a\":[1,2,3]}"]
-    (is (= {:a [1 2 3]} (oda/parse s)))
-    (is (= {:a [1 2 3]} (oda/parse (.getBytes s "UTF-8"))))
-    (is (= {:a [1 2 3]} (oda/parse (ByteArrayInputStream. (.getBytes s "UTF-8")))))
+    (is (= {"a" [1 2 3]} (oda/parse s)))
+    (is (= {"a" [1 2 3]} (oda/parse (.getBytes s "UTF-8"))))
+    (is (= {"a" [1 2 3]} (oda/parse (ByteArrayInputStream. (.getBytes s "UTF-8")))))
     (is (thrown? IllegalArgumentException (oda/parse 42)))))
 
 (deftest numbers
@@ -113,20 +116,42 @@
     (is (= long-s (oda/parse (str "\"" long-s "\""))))))
 
 (deftest keys-and-map-representation
-  (is (= {:a/b 1} (oda/parse "{\"a/b\":1}")))
-  (is (= {(keyword "") 1} (oda/parse "{\"\":1}")))
-  (is (= {:é 1} (oda/parse "{\"é\":1}")))
-  (is (= {:a 1} (oda/parse "{\"\\u0061\":1}")))
+  (is (= {:a/b 1} (oda/parse "{\"a/b\":1}" {:key-fn keyword})))
+  (is (= {(keyword "") 1} (oda/parse "{\"\":1}" {:key-fn keyword})))
+  (is (= {:é 1} (oda/parse "{\"é\":1}" {:key-fn keyword})))
+  (is (= {:a 1} (oda/parse "{\"\\u0061\":1}" {:key-fn keyword})))
   (is (instance? clojure.lang.PersistentArrayMap (oda/parse "{\"a\":1}")))
   (let [big (into {} (map (fn [i] [(keyword (str "k" i)) i])) (range 9))
         json (str "{" (clojure.string/join "," (map (fn [i] (str "\"k" i "\":" i)) (range 9))) "}")]
-    (is (= big (oda/parse json)))
+    (is (= big (oda/parse json {:key-fn keyword})))
     (is (instance? clojure.lang.PersistentHashMap (oda/parse json)))))
 
+(deftest custom-key-fn
+  (is (= {:a_b 1} (oda/parse "{\"a-b\":1}" {:key-fn #(keyword (str/replace % "-" "_"))})))
+  (is (= {"A" 1 "B" 2} (oda/parse "{\"a\":1,\"b\":2}" {:key-fn str/upper-case})))
+  ;; repeated keys must hit the per-parse cache and stay consistent
+  (let [json (str "[" (str/join "," (repeat 50 "{\"k\":1}")) "]")
+        calls (atom 0)
+        res (oda/parse json {:key-fn (fn [s] (swap! calls inc) (keyword s))})]
+    (is (= (repeat 50 {:k 1}) res))
+    (is (= 1 @calls)))
+  ;; escaped/non-ASCII keys go through the same fn
+  (is (= {"É" 1} (oda/parse "{\"é\":1}" {:key-fn str/upper-case})))
+  (is (= {"A" 1} (oda/parse "{\"\\u0061\":1}" {:key-fn str/upper-case})))
+  ;; same fn instance gets cross-parse caching (global identity-keyed table)
+  (let [calls (atom 0)
+        f (fn [s] (swap! calls inc) (keyword s))]
+    (is (= {:zqx1 1} (oda/parse "{\"zqx1\":1}" {:key-fn f})))
+    (is (= {:zqx1 1} (oda/parse "{\"zqx1\":1}" {:key-fn f})))
+    (is (= 1 @calls)))
+  ;; keywords are IFns doing lookup -> would silently produce nil keys
+  (is (thrown? IllegalArgumentException (oda/parse "{\"a\":1}" {:key-fn :keywords}))))
+
 (deftest duplicate-keys-last-wins
-  (is (= {:a 2} (oda/parse "{\"a\":1,\"a\":2}")))
+  (is (= {:a 2} (oda/parse "{\"a\":1,\"a\":2}" {:key-fn keyword})))
+  (is (= {"a" 2} (oda/parse "{\"a\":1,\"a\":2}")))
   (let [json (str "{" (clojure.string/join "," (map (fn [i] (str "\"k" (mod i 3) "\":" i)) (range 12))) "}")]
-    (is (= {:k0 9 :k1 10 :k2 11} (oda/parse json)))))
+    (is (= {:k0 9 :k1 10 :k2 11} (oda/parse json {:key-fn keyword})))))
 
 (deftest depth-limit
   (let [deep (str (apply str (repeat 100 "[")) (apply str (repeat 100 "]")))]
@@ -146,11 +171,13 @@
        (.listFiles)
        (sort-by #(.getName ^java.io.File %))))
 
-(defn- try-parse [^bytes bs opts]
-  (try
-    {:ok (parse-bytes bs opts)}
-    (catch JsonParseException e
-      {:error e})))
+(defn- try-parse
+  ([^bytes bs] (try-parse bs nil))
+  ([^bytes bs opts]
+   (try
+     {:ok (parse-bytes bs opts)}
+     (catch JsonParseException e
+       {:error e}))))
 
 (deftest json-test-suite
   (doseq [^java.io.File f (suite-files)
@@ -159,18 +186,18 @@
     (cond
       (.startsWith n "y_")
       (testing n
-        (is (contains? (try-parse bs {:keywordize false}) :ok) n)
+        (is (contains? (try-parse bs) :ok) n)
         ;; keyword mode must also not blow up on accepted docs
-        (is (map? (try-parse bs nil)) n))
+        (is (map? (try-parse bs {:key-fn keyword})) n))
 
       (.startsWith n "n_")
       (testing n
-        (is (contains? (try-parse bs {:keywordize false}) :error) n))
+        (is (contains? (try-parse bs) :error) n))
 
       ;; i_ files: implementation-defined, only require no unexpected throwable
       (.startsWith n "i_")
       (testing n
-        (is (map? (try-parse bs {:keywordize false})) n)))))
+        (is (map? (try-parse bs)) n)))))
 
 (deftest json-test-suite-differential
   (doseq [^java.io.File f (suite-files)
@@ -180,7 +207,7 @@
                 jsonista-result (try {:ok (j/read-value bs)} (catch Exception _ nil))]
           :when jsonista-result]
     (testing n
-      (is (= (:ok jsonista-result) (parse-bytes bs {:keywordize false})) n))))
+      (is (= (:ok jsonista-result) (parse-bytes bs)) n))))
 
 ;; ------------------------------------------------------- generative testing
 
@@ -202,13 +229,13 @@
 (defspec differential-string-keys 300
   (prop/for-all [v gen-json]
                 (let [bs (j/write-value-as-bytes v)]
-                  (= (j/read-value bs) (parse-bytes bs {:keywordize false})))))
+                  (= (j/read-value bs) (parse-bytes bs)))))
 
 (defspec differential-keyword-keys 300
   (prop/for-all [v gen-json]
                 (let [bs (j/write-value-as-bytes v)]
                   (= (j/read-value bs j/keyword-keys-object-mapper)
-                     (parse-bytes bs nil)))))
+                     (parse-bytes bs {:key-fn keyword})))))
 
 ;; ----------------------------------------------------------------- writer
 
@@ -242,7 +269,7 @@
   (let [out (java.io.ByteArrayOutputStream.)]
     (oda/write {:a [1 2]} out)
     (is (= "{\"a\":[1,2]}" (String. (.toByteArray out) "UTF-8"))))
-  (is (= {:a [1 2]} (oda/parse (oda/write-bytes {:a [1 2]})))))
+  (is (= {:a [1 2]} (oda/parse (oda/write-bytes {:a [1 2]}) {:key-fn keyword}))))
 
 (deftest writer-lone-surrogate
   ;; lone surrogates cannot be encoded as UTF-8; we emit U+FFFD
@@ -257,11 +284,11 @@
 
 (defspec write-parse-round-trip-strings 500
   (prop/for-all [v gen-json]
-                (= v (oda/parse (oda/write-bytes v) {:keywordize false}))))
+                (= v (oda/parse (oda/write-bytes v)))))
 
 (defspec write-parse-round-trip-keywords 500
   (prop/for-all [v gen-json-kw]
-                (= v (oda/parse (oda/write-bytes v)))))
+                (= v (oda/parse (oda/write-bytes v) {:key-fn keyword}))))
 
 (defspec write-differential-jsonista-reads-ours 300
   (prop/for-all [v gen-json]
@@ -271,6 +298,6 @@
   (doseq [^java.io.File f (suite-files)
           :let [n (.getName f)]
           :when (.startsWith n "y_")
-          :let [v (parse-bytes (Files/readAllBytes (.toPath f)) {:keywordize false})]]
+          :let [v (parse-bytes (Files/readAllBytes (.toPath f)))]]
     (testing n
-      (is (= v (oda/parse (oda/write-bytes v) {:keywordize false})) n))))
+      (is (= v (oda/parse (oda/write-bytes v))) n))))

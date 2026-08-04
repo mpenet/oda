@@ -83,6 +83,14 @@ vs jsonista (Jackson). Keyword keys:
 SIMD columns measured with the Vector API enabled (see below); `=` means
 within run-to-run noise of the scalar number.
 
+oda also allocates 2-3x less than jsonista per operation (reads ~2.5x less,
+writes ~2.5x less on the small-objects payload; writes allocate nothing but
+the result). For rigorous numbers there is a JMH harness:
+
+```shell
+clj -M:jmh quick vector          # or: full, scalar, plus payload names
+```
+
 **Writes allocate nothing beyond the returned array** (numbers included, via a
 Ryū port). Run `clj -M:bench -m s-exp.oda.bench` to reproduce (`clj
 -M:bench:vector` for the SIMD numbers).

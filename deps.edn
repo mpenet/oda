@@ -31,4 +31,13 @@
 
   ;; opt-in SIMD scanning (combine: clj -M:test:vector, clj -M:bench:vector)
   :vector
-  {:jvm-opts ["--add-modules" "jdk.incubator.vector"]}}}
+  {:jvm-opts ["--add-modules" "jdk.incubator.vector"]}
+
+  ;; JMH benchmarks: clj -M:jmh [quick|full] [scalar|vector] [payload...]
+  ;; NB: don't pin org.openjdk.jmh/* here — jmh-clojure 0.4.1 is built
+  ;; against its bundled JMH generator API; newer jmh-core breaks it
+  :jmh
+  {:extra-paths ["bench" "target/jmh-classes"]
+   :extra-deps {jmh-clojure/jmh-clojure {:mvn/version "0.4.1"}
+                metosin/jsonista {:mvn/version "0.3.13"}}
+   :main-opts ["-m" "s-exp.oda.jmh"]}}}

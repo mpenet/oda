@@ -15,10 +15,7 @@ documents — see [Optional SIMD](#optional-simd).
 
 ## Installation
 
-```clojure
-;; deps.edn
-com.s-exp/oda {:mvn/version "1.0.0-alphaN"}
-```
+[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/hako.svg)](https://clojars.org/com.s-exp/hako)
 
 Requires JDK 25+. The jar ships the compiled Java core; when working from a
 git checkout instead, compile it once with `clj -T:build javac`.

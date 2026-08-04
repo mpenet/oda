@@ -36,11 +36,17 @@
    (vec (concat (map #(* % 12345) (range 2500))
                 (map #(* % 0.12345) (range 2500))))))
 
+(def ascii-long
+  "Long pure-ASCII strings: log lines, base64 blobs, CSV-in-JSON etc."
+  (j/write-value-as-bytes
+   (vec (repeat 100 (apply str (repeat 2400 "abcdefgh "))))))
+
 (defn payloads []
   {:small-objects small-objects
    :string-heavy string-heavy
    :string-heavy-raw string-heavy-raw
    :number-heavy number-heavy
+   :ascii-long ascii-long
    :twitter (slurp-bytes "bench-resources/twitter.json")
    :citm (slurp-bytes "bench-resources/citm_catalog.json")})
 

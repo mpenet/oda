@@ -77,6 +77,7 @@ vs jsonista (Jackson). Keyword keys:
 | small objects, repeated keys | **1.9x** | = | 1.4x | = |
 | string-heavy (raw UTF-8) | **1.2x** | **1.6x** | 0.9x | 1.0x |
 | string-heavy (\uXXXX escapes) | **1.1x** | = | 0.9x | 1.0x |
+| long ASCII strings | **1.5x** | **3.5x** | 1.0x | **4.7x** |
 | twitter.json | **1.2x** | = | **1.8x** | = |
 
 SIMD columns measured with the Vector API enabled (see below); `=` means
@@ -91,11 +92,11 @@ Ryū port). Run `clj -M:bench -m s-exp.oda.bench` to reproduce (`clj
 With the (incubating) Vector API enabled, string scanning and encoding go
 16 bytes at a time. 
 
-Measured A/B deltas on the same JVM: 
+Measured A/B deltas against oda's own scalar paths: 
 
+* long pure-ASCII strings: read **~2.3x**, write **~4.4x**
 * raw string-heavy read **+22%**
 * string-heavy writes **+5-6%**
-* long pure-ASCII string writes **~5x**
 * short-string payloads unaffected (a run-length heuristic keeps them on the scalar path). 
 
 

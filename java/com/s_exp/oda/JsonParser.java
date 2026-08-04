@@ -226,6 +226,13 @@ public final class JsonParser {
         int start = pos;
         int p = start;
         long high = 0;
+        // the cache hash is accumulated during the scan itself so clean keys
+        // are read once; chunking (full words, then a masked partial) is
+        // position-independent, so equal keys hash equally anywhere in a doc
+        long h = KeyCache.HASH_SEED;
+        long pend = 0;
+        int pendShift = 0;
+        boolean fusedHash = true;
         while (true) {
             int runStart = p;
             while (end - p >= 8) {
@@ -233,17 +240,23 @@ public final class JsonParser {
                     long r = VectorScan.scanString(b, p, end);
                     high |= r & 1L;
                     p = (int) (r >>> 1);
+                    fusedHash = false; // rare long key: rehash via KeyCache
                     break;
                 }
                 long w = (long) LONG_LE.get(b, p);
                 long m = structMask(w);
                 if (m != 0) {
                     int i = Long.numberOfTrailingZeros(m) >>> 3;
-                    high |= w & HIGH_BITS & ((1L << (i << 3)) - 1);
+                    long below = (1L << (i << 3)) - 1;
+                    high |= w & HIGH_BITS & below;
+                    if (i != 0) {
+                        h = KeyCache.mix(h, w & below);
+                    }
                     p += i;
                     break;
                 }
                 high |= w & HIGH_BITS;
+                h = KeyCache.mix(h, w);
                 p += 8;
             }
             if (p >= end) {
@@ -254,12 +267,15 @@ public final class JsonParser {
                 if (high == 0) {
                     pos = p + 1;
                     int len = p - start;
-                    int h = KeyCache.hash(b, start, len);
-                    Object k = KeyCache.lookup(keyTable, b, start, len, h);
+                    if (pendShift != 0) {
+                        h = KeyCache.mix(h, pend);
+                    }
+                    int hash = fusedHash ? KeyCache.finish(h, len) : KeyCache.hash(b, start, len);
+                    Object k = KeyCache.lookup(keyTable, b, start, len, hash);
                     if (k != null) {
                         return k;
                     }
-                    return missKey(b, start, len, h);
+                    return missKey(b, start, len, hash);
                 }
                 // non-ASCII key: rare, take the String path (pos untouched)
                 return finishKeySlow();
@@ -270,6 +286,10 @@ public final class JsonParser {
                 high = 1;
                 p++;
             } else {
+                // clean byte in the <8-byte doc tail: matches the masked-word
+                // chunk encoding (little-endian accumulation)
+                pend |= (long) c << pendShift;
+                pendShift += 8;
                 p++;
             }
         }

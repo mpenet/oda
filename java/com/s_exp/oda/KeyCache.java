@@ -54,12 +54,31 @@ final class KeyCache {
     private static final VarHandle LONG_LE =
             MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
+    static final long HASH_SEED = 0x9E3779B97F4A7C15L;
+
+    static long mix(long h, long chunk) {
+        return (h ^ chunk) * 0x9E3779B97F4A7C15L;
+    }
+
+    static int finish(long h, int len) {
+        h ^= len;
+        h ^= h >>> 33;
+        h *= 0xFF51AFD7ED558CCDL;
+        h ^= h >>> 33;
+        return (int) h;
+    }
+
+    /**
+     * Chunked hash over a byte span: full little-endian words, then the
+     * remainder accumulated low-to-high. Must produce the same result as the
+     * scan-fused accumulation in JsonParser.parseKey.
+     */
     static int hash(byte[] b, int off, int len) {
-        long h = 0x9E3779B97F4A7C15L ^ len;
+        long h = HASH_SEED;
         int i = off;
         int stop = off + len;
         while (stop - i >= 8) {
-            h = (h ^ (long) LONG_LE.get(b, i)) * 0x9E3779B97F4A7C15L;
+            h = mix(h, (long) LONG_LE.get(b, i));
             i += 8;
         }
         if (i < stop) {
@@ -67,11 +86,8 @@ final class KeyCache {
             for (int shift = 0; i < stop; i++, shift += 8) {
                 k |= (b[i] & 0xFFL) << shift;
             }
-            h = (h ^ k) * 0x9E3779B97F4A7C15L;
+            h = mix(h, k);
         }
-        h ^= h >>> 33;
-        h *= 0xFF51AFD7ED558CCDL;
-        h ^= h >>> 33;
-        return (int) h;
+        return finish(h, len);
     }
 }

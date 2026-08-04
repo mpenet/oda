@@ -167,7 +167,7 @@ public final class JsonWriter {
         } else if (x instanceof Double d) {
             writeDouble(d);
         } else if (x instanceof Keyword k) {
-            writeJsonString(k.sym.toString());
+            writeKeywordValue(k);
         } else if (x instanceof Boolean b) {
             writeRaw(b ? TRUE_BYTES : FALSE_BYTES);
         } else if (x instanceof IPersistentMap m) {
@@ -288,9 +288,14 @@ public final class JsonWriter {
     private record StrFrag(String key, byte[] frag) {
     }
 
+    /** Keyword VALUES (quoted, no colon): enum-like keywords repeat a lot. */
+    private record KwVal(Keyword kw, byte[] frag) {
+    }
+
     private static final int FRAG_MASK = 8191;
     private static final KwFrag[] KW_FRAGS = new KwFrag[FRAG_MASK + 1];
     private static final StrFrag[] STR_FRAGS = new StrFrag[FRAG_MASK + 1];
+    private static final KwVal[] KW_VALS = new KwVal[FRAG_MASK + 1];
     private static final int MAX_CACHED_KEY_LENGTH = 64;
 
     private void writeKeywordKey(Keyword kw) {
@@ -302,6 +307,18 @@ public final class JsonWriter {
         }
         byte[] frag = escapedKeyFragment(kw.sym.toString());
         KW_FRAGS[i] = new KwFrag(kw, frag);
+        writeRaw(frag);
+    }
+
+    private void writeKeywordValue(Keyword kw) {
+        int i = kw.hashCode() & FRAG_MASK;
+        KwVal e = KW_VALS[i];
+        if (e != null && e.kw() == kw) {
+            writeRaw(e.frag());
+            return;
+        }
+        byte[] frag = escapedJsonStringBytes(kw.sym.toString());
+        KW_VALS[i] = new KwVal(kw, frag);
         writeRaw(frag);
     }
 
@@ -540,12 +557,19 @@ public final class JsonWriter {
         return p;
     }
 
-    /** Builds the pre-escaped {@code "key":} fragment for the keyword cache. */
+    /** Builds the pre-escaped {@code "key":} fragment for the key caches. */
     static byte[] escapedKeyFragment(String s) {
         JsonWriter w = new JsonWriter();
         w.writeJsonString(s);
         w.ensure(1);
         w.buf[w.n++] = ':';
+        return Arrays.copyOf(w.buf, w.n);
+    }
+
+    /** Builds the pre-escaped quoted string for the keyword value cache. */
+    static byte[] escapedJsonStringBytes(String s) {
+        JsonWriter w = new JsonWriter();
+        w.writeJsonString(s);
         return Arrays.copyOf(w.buf, w.n);
     }
 

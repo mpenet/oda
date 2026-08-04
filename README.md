@@ -115,3 +115,13 @@ Without the module oda silently uses its scalar (SWAR) paths.
   conversion (ported from [FastDoubleParser](https://github.com/wrandelshofer/FastDoubleParser), MIT)
 - writer: flat instanceof dispatch, pre-escaped key fragment caches,
   pair-table long rendering; streaming writes flush a 64KB buffer
+
+## License
+
+Copyright © Max Penet. Distributed under the
+[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)
+(see `LICENSE`).
+
+`EiselLemire.java` is ported from
+[FastDoubleParser](https://github.com/wrandelshofer/FastDoubleParser),
+Copyright © Werner Randelshofer, MIT License.

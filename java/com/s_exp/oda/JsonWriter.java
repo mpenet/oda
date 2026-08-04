@@ -1,7 +1,9 @@
 package com.s_exp.oda;
 
+import clojure.lang.AFn;
 import clojure.lang.BigInt;
 import clojure.lang.IFn;
+import clojure.lang.IKVReduce;
 import clojure.lang.IMapEntry;
 import clojure.lang.IPersistentMap;
 import clojure.lang.Keyword;
@@ -210,19 +212,47 @@ public final class JsonWriter {
 
     // ------------------------------------------------------------ structures
 
-    private void writeMap(IPersistentMap m) {
-        ensure(2);
-        buf[n++] = '{';
-        boolean first = true;
-        for (Object o : (Iterable<?>) m) {
-            IMapEntry e = (IMapEntry) o;
-            if (!first) {
+    private boolean needComma;
+
+    /**
+     * kvreduce passes keys/values directly, avoiding the MapEntry (and PHM
+     * NodeIter) allocation per entry that map iterators cost. Single reused
+     * instance keeps the kvreduce call site monomorphic.
+     */
+    private final IFn entryWriter = new AFn() {
+        @Override
+        public Object invoke(Object acc, Object k, Object v) {
+            if (needComma) {
                 ensure(1);
                 buf[n++] = ',';
             }
-            first = false;
-            writeKey(e.key());
-            writeValue(e.val());
+            needComma = true;
+            writeKey(k);
+            writeValue(v);
+            return acc;
+        }
+    };
+
+    private void writeMap(IPersistentMap m) {
+        ensure(2);
+        buf[n++] = '{';
+        if (m instanceof IKVReduce kv) {
+            boolean saved = needComma; // nested maps reenter through writeValue
+            needComma = false;
+            kv.kvreduce(entryWriter, null);
+            needComma = saved;
+        } else {
+            boolean first = true;
+            for (Object o : (Iterable<?>) m) {
+                IMapEntry e = (IMapEntry) o;
+                if (!first) {
+                    ensure(1);
+                    buf[n++] = ',';
+                }
+                first = false;
+                writeKey(e.key());
+                writeValue(e.val());
+            }
         }
         ensure(1);
         buf[n++] = '}';
@@ -345,10 +375,95 @@ public final class JsonWriter {
         // worst case 6 bytes per char (\ u00XX); paying it upfront removes
         // all capacity checks from the loop
         ensure(6 * len + 2);
-        byte[] b = buf;
         int p = n;
-        b[p++] = '"';
+        buf[p++] = '"';
+        if (JsonParser.VECTOR && len >= 32) {
+            p = encodeVector(cs, len, p);
+        } else {
+            p = encodeScalar(cs, 0, len, p);
+        }
+        buf[p++] = '"';
+        n = p;
+    }
+
+    /**
+     * SIMD path: bulk-encodes clean ASCII runs, handling dirty chars one at
+     * a time in between. Two consecutive low-progress vector probes mean the
+     * string is dirty-dense: bail to the scalar loop for the rest.
+     */
+    private int encodeVector(char[] cs, int len, int p) {
         int i = 0;
+        int poor = 0;
+        while (i < len) {
+            if (poor >= 2 || len - i < 8) {
+                return encodeScalar(cs, i, len, p);
+            }
+            int k = VectorScan.encodeAscii(cs, i, len, buf, p);
+            i += k;
+            p += k;
+            poor = k >= 8 ? 0 : poor + 1;
+            if (i >= len) {
+                break;
+            }
+            long r = encodeDirty(cs, i, len, p);
+            i = (int) (r >>> 32);
+            p = (int) r;
+        }
+        return p;
+    }
+
+    /** Encodes the single (dirty) char at i; returns (newI << 32) | newP. */
+    private long encodeDirty(char[] cs, int i, int len, int p) {
+        byte[] b = buf;
+        char c = cs[i];
+        if (c < 0x80) {
+            byte esc = ESCAPE[c];
+            if (esc == 'u') {
+                b[p++] = '\\';
+                b[p++] = 'u';
+                b[p++] = '0';
+                b[p++] = '0';
+                b[p++] = HEX_DIGITS[(c >> 4) & 0xf];
+                b[p++] = HEX_DIGITS[c & 0xf];
+            } else if (esc != 0) {
+                b[p++] = '\\';
+                b[p++] = esc;
+            } else {
+                b[p++] = (byte) c; // vector stopped in the tail on a clean char
+            }
+            i++;
+        } else if (c < 0x800) {
+            b[p++] = (byte) (0xC0 | (c >> 6));
+            b[p++] = (byte) (0x80 | (c & 0x3F));
+            i++;
+        } else if (c >= 0xD800 && c <= 0xDFFF) {
+            if (c <= 0xDBFF && i + 1 < len) {
+                char c2 = cs[i + 1];
+                if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+                    int cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+                    b[p++] = (byte) (0xF0 | (cp >> 18));
+                    b[p++] = (byte) (0x80 | ((cp >> 12) & 0x3F));
+                    b[p++] = (byte) (0x80 | ((cp >> 6) & 0x3F));
+                    b[p++] = (byte) (0x80 | (cp & 0x3F));
+                    return ((long) (i + 2) << 32) | p;
+                }
+            }
+            b[p++] = (byte) 0xEF;
+            b[p++] = (byte) 0xBF;
+            b[p++] = (byte) 0xBD;
+            i++;
+        } else {
+            b[p++] = (byte) (0xE0 | (c >> 12));
+            b[p++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+            b[p++] = (byte) (0x80 | (c & 0x3F));
+            i++;
+        }
+        return ((long) i << 32) | p;
+    }
+
+    /** The plain scalar encode loop; also the fallback tail for the SIMD path. */
+    private int encodeScalar(char[] cs, int i, int len, int p) {
+        byte[] b = buf;
         while (i < len) {
             char c = cs[i];
             if (c < 0x80) {
@@ -396,8 +511,7 @@ public final class JsonWriter {
                 i++;
             }
         }
-        b[p++] = '"';
-        n = p;
+        return p;
     }
 
     /** Builds the pre-escaped {@code "key":} fragment for the keyword cache. */

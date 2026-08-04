@@ -1,6 +1,7 @@
 package com.s_exp.oda;
 
 import jdk.incubator.vector.ByteVector;
+import jdk.incubator.vector.ShortVector;
 import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
@@ -61,5 +62,39 @@ final class VectorScan {
             p += LANES;
         }
         return p;
+    }
+
+    // fixed 128-bit shorts -> 64-bit bytes keeps the S2B conversion a
+    // simple narrowing on every platform supporting the Vector API
+    private static final VectorSpecies<Short> SHORT_SPECIES = ShortVector.SPECIES_128;
+    private static final VectorSpecies<Byte> NARROW_SPECIES = ByteVector.SPECIES_64;
+    private static final int SHORT_LANES = SHORT_SPECIES.length();
+
+    /**
+     * Encodes chars that need no escaping and no multi-byte UTF-8
+     * (0x20..0x7f minus '"' and '\\') from cs[i..limit) into out[p...],
+     * 1 byte per char. Returns the number of chars encoded; stops at the
+     * first char needing scalar treatment or when fewer than a vector's
+     * worth remain.
+     */
+    static int encodeAscii(char[] cs, int i, int limit, byte[] out, int p) {
+        int n = 0;
+        while (limit - (i + n) >= SHORT_LANES) {
+            ShortVector v = ShortVector.fromCharArray(SHORT_SPECIES, cs, i + n);
+            VectorMask<Short> dirty = v.compare(VectorOperators.ULT, (short) 0x20)
+                    .or(v.compare(VectorOperators.UGE, (short) 0x80))
+                    .or(v.eq((short) '"'))
+                    .or(v.eq((short) '\\'));
+            // store unconditionally: the caller reserves 6 bytes per char,
+            // so lanes past a dirty char write scratch that the caller
+            // overwrites; advancing by firstTrue keeps correctness
+            ((ByteVector) v.convertShape(VectorOperators.S2B, NARROW_SPECIES, 0))
+                    .intoArray(out, p + n);
+            if (dirty.anyTrue()) {
+                return n + dirty.firstTrue();
+            }
+            n += SHORT_LANES;
+        }
+        return n;
     }
 }

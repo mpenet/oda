@@ -74,15 +74,15 @@ keys. All multipliers are oda's speedup relative to jsonista (Jackson);
 higher is better, below 1.0x jsonista is faster. SIMD columns have the
 Vector API enabled (see below).
 
-| payload | read | read (SIMD) | write | write (SIMD) |
+| payload | read | write | read (SIMD) | write (SIMD) |
 |---|---|---|---|---|
-| number-heavy | **2.4x** | **2.3x** | 1.3x | 1.2x |
-| citm_catalog | **1.9x** | **1.9x** | **2.5x** | **2.6x** |
-| small objects, repeated keys | **1.8x** | **1.8x** | 1.1x | 1.2x |
-| long ASCII strings | **1.5x** | **3.6x** | 1.1x | **5.0x** |
-| twitter.json | 1.2x | 1.2x | **1.9x** | **2.1x** |
-| string-heavy (raw UTF-8) | 1.1x | **1.4x** | 1.1x | 1.1x |
-| string-heavy (\uXXXX escapes) | 1.0x | 1.0x | **1.2x** | 1.1x |
+| number-heavy | **2.4x** | 1.3x | **2.3x** | 1.2x |
+| citm_catalog | **1.9x** | **2.5x** | **1.9x** | **2.6x** |
+| small objects, repeated keys | **1.8x** | 1.1x | **1.8x** | 1.2x |
+| long ASCII strings | **1.5x** | 1.1x | **3.6x** | **5.0x** |
+| twitter.json | 1.2x | **1.9x** | 1.2x | **2.1x** |
+| string-heavy (raw UTF-8) | 1.1x | 1.1x | **1.4x** | 1.1x |
+| string-heavy (\uXXXX escapes) | 1.0x | **1.2x** | 1.0x | 1.1x |
 
 Jackson's escaped-string writer is bimodal across JVM forks (~1.5ms or
 ~4ms per op on the string payloads); the ratios above use its fast mode.
@@ -98,10 +98,7 @@ clj -M:jmh quick vector    # or: full, scalar, plus payload/benchmark names
 ### Optional SIMD
 
 With the (incubating) Vector API enabled, string scanning and encoding go
-16 bytes at a time. Standout deltas vs oda's own scalar paths: long
-pure-ASCII strings read **~2.4x**, write **~4.4x**; raw UTF-8 string-heavy
-read **+27%**. Short-string and mixed-unicode payloads see no benefit (a
-run-length heuristic keeps them on the scalar path).
+16 bytes at a time.
 
 Enable with:
 

@@ -67,33 +67,31 @@ JVM numbers (Ratio written as double), booleans, nil. NaN/Infinity throw.
 
 ## Performance
 
-Criterium means, Apple M-series, JDK 25, default (scalar) configuration,
-vs jsonista (Jackson). Keyword keys:
+JMH (forked, average time, gc-profiled), Apple M-series, JDK 25, keyword
+keys. All multipliers are oda's speedup relative to jsonista (Jackson);
+higher is better, below 1.0x jsonista is faster. SIMD columns have the
+Vector API enabled (see below).
 
 | payload | read | read (SIMD) | write | write (SIMD) |
 |---|---|---|---|---|
-| number-heavy | **2.4x** | = | 1.3x | = |
-| citm_catalog | **1.8x** | = | **2.3x** | = |
-| small objects, repeated keys | **1.9x** | = | 1.4x | = |
-| string-heavy (raw UTF-8) | **1.2x** | **1.6x** | 0.9x | 1.0x |
-| string-heavy (\uXXXX escapes) | **1.1x** | = | 0.9x | 1.0x |
-| long ASCII strings | **1.5x** | **3.5x** | 1.0x | **4.7x** |
-| twitter.json | **1.2x** | = | **1.8x** | = |
+| number-heavy | **2.2x** | **2.3x** | 1.3x | 1.2x |
+| small objects, repeated keys | **2.0x** | **1.8x** | 1.2x | 1.3x |
+| citm_catalog | **1.5x** | **1.6x** | **2.6x** | **2.4x** |
+| long ASCII strings | **1.5x** | **3.6x** | 1.2x | **4.4x** |
+| twitter.json | 1.1x | 1.2x | **1.9x** | **2.3x** |
+| string-heavy (raw UTF-8) | 1.1x | 1.3x | 0.9x | 0.9x |
+| string-heavy (\uXXXX escapes) | 0.9x | 1.0x | 0.9x | 0.9x |
 
-SIMD columns measured with the Vector API enabled (see below); `=` means
-within run-to-run noise of the scalar number.
+Jackson's escaped-string writer is bimodal across JVM forks (~1.5ms or
+~4ms per op on the string payloads); the ratios above use its fast mode.
 
-oda also allocates 2-3x less than jsonista per operation (reads ~2.5x less,
-writes ~2.5x less on the small-objects payload; writes allocate nothing but
-the result). For rigorous numbers there is a JMH harness:
+oda also allocates 2-5x less than jsonista per operation on most payloads
+(e.g. citm read: 1.4MB vs 7.9MB per op). **Writes allocate nothing beyond
+the returned array** (numbers included, via a Ryū port). Reproduce with:
 
 ```shell
-clj -M:jmh quick vector          # or: full, scalar, plus payload names
+clj -M:jmh quick vector    # or: full, scalar, plus payload/benchmark names
 ```
-
-**Writes allocate nothing beyond the returned array** (numbers included, via a
-Ryū port). Run `clj -M:bench -m s-exp.oda.bench` to reproduce (`clj
--M:bench:vector` for the SIMD numbers).
 
 ### Optional SIMD
 

@@ -95,14 +95,24 @@
       (clojure.pprint/pprint r)))
   (flush))
 
-(defn -main [& args]
-  (let [[preset mode & payloads] args
+(def ^:private bench-names
+  (into #{} (map (comp name :name)) (:benchmarks spec)))
+
+(defn -main
+  "args: [preset] [mode] then any mix of payload names and benchmark names,
+  e.g.: quick vector string-heavy oda-read-kw jsonista-read-kw"
+  [& args]
+  (let [[preset mode & rest-args] args
         preset (or preset "quick")
         mode (or mode "scalar")
+        {selects true payloads false} (group-by #(contains? bench-names %) rest-args)
         spec (if (seq payloads)
                (assoc-in spec [:params :payload] (vec payloads))
-               spec)]
+               spec)
+        opts (cond-> (run-opts preset mode)
+               (seq selects) (assoc :select (mapv keyword selects)))]
     (println "jmh:" preset mode
-             (str/join "," (get-in spec [:params :payload])))
-    (report (jmh/run spec (run-opts preset mode)))
+             (str/join "," (get-in spec [:params :payload]))
+             (if (seq selects) (str "select=" (str/join "," selects)) ""))
+    (report (jmh/run spec opts))
     (shutdown-agents)))

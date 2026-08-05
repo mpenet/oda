@@ -52,12 +52,13 @@ final class VectorScan {
     static int scanSpecial(byte[] b, int p, int end) {
         while (end - p >= LANES) {
             ByteVector v = ByteVector.fromArray(SPECIES, b, p);
-            VectorMask<Byte> m = v.eq((byte) '"')
+            long m = v.eq((byte) '"')
                     .or(v.eq((byte) '\\'))
                     .or(v.compare(VectorOperators.ULT, (byte) 0x20))
-                    .or(v.lt((byte) 0));
-            if (m.anyTrue()) {
-                return p + m.firstTrue();
+                    .or(v.lt((byte) 0))
+                    .toLong();
+            if (m != 0) {
+                return p + Long.numberOfTrailingZeros(m);
             }
             p += LANES;
         }
@@ -81,17 +82,18 @@ final class VectorScan {
         int n = 0;
         while (limit - (i + n) >= SHORT_LANES) {
             ShortVector v = ShortVector.fromCharArray(SHORT_SPECIES, cs, i + n);
-            VectorMask<Short> dirty = v.compare(VectorOperators.ULT, (short) 0x20)
+            long dirty = v.compare(VectorOperators.ULT, (short) 0x20)
                     .or(v.compare(VectorOperators.UGE, (short) 0x80))
                     .or(v.eq((short) '"'))
-                    .or(v.eq((short) '\\'));
+                    .or(v.eq((short) '\\'))
+                    .toLong();
             // store unconditionally: the caller reserves 6 bytes per char,
             // so lanes past a dirty char write scratch that the caller
-            // overwrites; advancing by firstTrue keeps correctness
+            // overwrites; advancing to the first dirty lane keeps correctness
             ((ByteVector) v.convertShape(VectorOperators.S2B, NARROW_SPECIES, 0))
                     .intoArray(out, p + n);
-            if (dirty.anyTrue()) {
-                return n + dirty.firstTrue();
+            if (dirty != 0) {
+                return n + Long.numberOfTrailingZeros(dirty);
             }
             n += SHORT_LANES;
         }

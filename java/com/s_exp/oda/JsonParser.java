@@ -111,29 +111,30 @@ public final class JsonParser {
      */
     public static Object parse(byte[] buf, int offset, int length, IFn keyFn, int maxDepth) {
         JsonParser p = new JsonParser(buf, offset, length, keyFn, maxDepth);
-        p.skipWs();
-        Object v = p.parseValue(0);
-        p.skipWs();
-        if (p.pos != p.end) {
+        int c = p.nextToken();
+        Object v = p.parseValue(0, c);
+        if (p.nextToken() != -1) {
             throw p.err("trailing characters after JSON value");
         }
         return v;
     }
 
-    private Object parseValue(int depth) {
-        if (pos >= end) {
-            throw err("unexpected end of input");
-        }
-        byte b = buf[pos];
-        switch (b) {
+    /**
+     * Dispatches on the token byte returned by nextToken (pos points at it):
+     * fusing the whitespace skip with dispatch keeps the byte in a register
+     * instead of re-reading buf[pos] after a field round-trip.
+     */
+    private Object parseValue(int depth, int c) {
+        switch (c) {
             case '{': return parseObject(depth);
             case '[': return parseArray(depth);
             case '"': pos++; return parseString();
             case 't': return parseTrue();
             case 'f': return parseFalse();
             case 'n': return parseNull();
+            case -1: throw err("unexpected end of input");
             default:
-                if (b == '-' || (b >= '0' && b <= '9')) {
+                if (c == '-' || (c >= '0' && c <= '9')) {
                     return parseNumber();
                 }
                 throw err("unexpected character");
@@ -147,26 +148,24 @@ public final class JsonParser {
             throw err("max nesting depth exceeded");
         }
         pos++; // '{'
-        skipWs();
-        if (pos < end && buf[pos] == '}') {
+        int c = nextToken();
+        if (c == '}') {
             pos++;
             return PersistentArrayMap.EMPTY;
         }
         Object[] kvs = kvBuf(depth);
         int n = 0;
         while (true) {
-            if (pos >= end || buf[pos] != '"') {
+            if (c != '"') {
                 throw err("expected string key");
             }
             pos++;
             Object k = parseKey();
-            skipWs();
-            if (pos >= end || buf[pos] != ':') {
+            if (nextToken() != ':') {
                 throw err("expected ':'");
             }
             pos++;
-            skipWs();
-            Object v = parseValue(depth + 1);
+            Object v = parseValue(depth + 1, nextToken());
             if (n == kvs.length) {
                 kvs = Arrays.copyOf(kvs, n << 1);
                 kvBufs[depth] = kvs;
@@ -174,17 +173,15 @@ public final class JsonParser {
             kvs[n] = k;
             kvs[n + 1] = v;
             n += 2;
-            skipWs();
-            if (pos >= end) {
-                throw err("unterminated object");
-            }
-            byte c = buf[pos];
+            c = nextToken();
             if (c == ',') {
                 pos++;
-                skipWs();
+                c = nextToken();
             } else if (c == '}') {
                 pos++;
                 return buildMap(kvs, n);
+            } else if (c == -1) {
+                throw err("unterminated object");
             } else {
                 throw err("expected ',' or '}'");
             }
@@ -236,7 +233,7 @@ public final class JsonParser {
         while (true) {
             int runStart = p;
             while (end - p >= 8) {
-                if (VECTOR && p - runStart >= 16) {
+                if (VECTOR && p - runStart >= 32) {
                     long r = VectorScan.scanString(b, p, end);
                     high |= r & 1L;
                     p = (int) (r >>> 1);
@@ -321,31 +318,29 @@ public final class JsonParser {
             throw err("max nesting depth exceeded");
         }
         pos++; // '['
-        skipWs();
-        if (pos < end && buf[pos] == ']') {
+        int c = nextToken();
+        if (c == ']') {
             pos++;
             return PersistentVector.EMPTY;
         }
         Object[] vals = valBuf(depth);
         int n = 0;
         while (true) {
-            Object v = parseValue(depth + 1);
+            Object v = parseValue(depth + 1, c);
             if (n == vals.length) {
                 vals = Arrays.copyOf(vals, n << 1);
                 valBufs[depth] = vals;
             }
             vals[n++] = v;
-            skipWs();
-            if (pos >= end) {
-                throw err("unterminated array");
-            }
-            byte c = buf[pos];
+            c = nextToken();
             if (c == ',') {
                 pos++;
-                skipWs();
+                c = nextToken();
             } else if (c == ']') {
                 pos++;
                 return LazilyPersistentVector.createOwning(Arrays.copyOf(vals, n));
+            } else if (c == -1) {
+                throw err("unterminated array");
             } else {
                 throw err("expected ',' or ']'");
             }
@@ -366,7 +361,7 @@ public final class JsonParser {
             // spans lose to vector setup cost
             int runStart = p;
             while (end - p >= 8) {
-                if (VECTOR && p - runStart >= 16) {
+                if (VECTOR && p - runStart >= 32) {
                     long r = VectorScan.scanString(b, p, end);
                     high |= r & 1L;
                     p = (int) (r >>> 1);
@@ -388,6 +383,9 @@ public final class JsonParser {
             }
             int c = b[p] & 0xff;
             if (c == '"') {
+                // NB: don't hand-roll the UTF-8 decode here — measured 19-67%
+                // slower than the intrinsified JDK ctor despite halving
+                // allocations (JMH A/B, 2026-08)
                 String s = new String(b, start, p - start,
                         high != 0 ? StandardCharsets.UTF_8 : StandardCharsets.ISO_8859_1);
                 pos = p + 1;
@@ -417,7 +415,7 @@ public final class JsonParser {
             // the copy loop is the JIT's byte->char inflate idiom
             int q = p;
             while (end - q >= 8) {
-                if (VECTOR && q - p >= 16) {
+                if (VECTOR && q - p >= 32) {
                     q = VectorScan.scanSpecial(b, q, end);
                     break;
                 }
@@ -753,7 +751,12 @@ public final class JsonParser {
 
     // ------------------------------------------------------------------ misc
 
-    private void skipWs() {
+    /**
+     * Skips whitespace and returns the byte at the resulting pos as an
+     * unsigned int, or -1 at end of input. Fused skip+peek: callers branch
+     * on the return value instead of re-reading buf[pos].
+     */
+    private int nextToken() {
         byte[] b = buf;
         int p = pos;
         while (p < end) {
@@ -772,10 +775,12 @@ public final class JsonParser {
                     p += 8;
                 }
             } else {
-                break;
+                pos = p;
+                return c & 0xff;
             }
         }
         pos = p;
+        return -1;
     }
 
     private static final long SEVEN_F = 0x7F7F7F7F7F7F7F7FL;

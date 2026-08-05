@@ -1,7 +1,5 @@
 # oda
 
-[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/oda.svg)](https://clojars.org/com.s-exp/oda)
-
 Fast JSON parser/writer for Clojure. Zero dependencies, JDK 25+.
 
 oda is **fast, low-allocation, and correct**: it outperforms Jackson-backed

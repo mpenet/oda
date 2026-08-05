@@ -78,7 +78,7 @@ Vector API enabled (see below).
 |---|---|---|---|---|
 | number-heavy | **2.3x** | **2.3x** | 1.2x | 1.3x |
 | small objects, repeated keys | **1.8x** | **1.9x** | 1.2x | 1.2x |
-| citm_catalog | **1.6x** | **1.6x** | **2.5x** | **2.5x** |
+| citm_catalog | **1.7x** | **1.7x** | **2.5x** | **2.5x** |
 | long ASCII strings | **1.5x** | **3.6x** | 1.1x | **4.3x** |
 | twitter.json | 1.1x | 1.2x | **1.9x** | **2.1x** |
 | string-heavy (raw UTF-8) | 1.1x | 1.4x | 1.1x | 1.1x |

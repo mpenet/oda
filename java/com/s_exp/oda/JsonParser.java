@@ -210,14 +210,19 @@ public final class JsonParser {
 
     private static Object buildMap(Object[] kvs, int n) {
         if (n <= ARRAY_MAP_THRESHOLD) {
-            // last-wins duplicate handling; identity check hits first for interned keywords
+            // Last-wins duplicate handling. Fast path is a pointer compare:
+            // interned keywords and KeyCache-hit strings share identity for
+            // duplicate keys within a document, so Util.equiv is only needed
+            // when identity fails (rare — malformed input with mixed
+            // interned/uninterned key objects).
             Object[] arr = new Object[n];
             int m = 0;
             outer:
             for (int i = 0; i < n; i += 2) {
                 Object k = kvs[i];
                 for (int j = 0; j < m; j += 2) {
-                    if (Util.equiv(arr[j], k)) {
+                    Object stored = arr[j];
+                    if (stored == k || Util.equiv(stored, k)) {
                         arr[j + 1] = kvs[i + 1];
                         continue outer;
                     }

@@ -58,6 +58,26 @@ public final class JsonParser {
     private static final Object CORE_KEYWORD = RT.var("clojure.core", "keyword").deref();
 
     /**
+     * Maximum kv-count (keys times 2) for building a PersistentArrayMap
+     * directly instead of a transient PersistentHashMap; matches Clojure's
+     * own promotion threshold. Detected via reflection at class load so
+     * a future Clojure release that raises the threshold is picked up
+     * automatically. Falls back to 16 (historical value).
+     */
+    private static final int ARRAY_MAP_THRESHOLD = detectArrayMapThreshold();
+
+    private static int detectArrayMapThreshold() {
+        try {
+            java.lang.reflect.Field f =
+                    PersistentArrayMap.class.getDeclaredField("HASHTABLE_THRESHOLD");
+            f.setAccessible(true);
+            return f.getInt(null);
+        } catch (Throwable ignored) {
+            return 16;
+        }
+    }
+
+    /**
      * Per-fn-instance key tables for custom key fns, keyed by identity.
      * Requires key fns to be pure. Weak keys: tables of discarded lambdas
      * get collected; a def'd fn keeps its table and gets cross-parse
@@ -189,7 +209,7 @@ public final class JsonParser {
     }
 
     private static Object buildMap(Object[] kvs, int n) {
-        if (n <= 16) {
+        if (n <= ARRAY_MAP_THRESHOLD) {
             // last-wins duplicate handling; identity check hits first for interned keywords
             Object[] arr = new Object[n];
             int m = 0;

@@ -718,7 +718,7 @@ public final class JsonWriter {
 
     /** Direct single-char write: skips String.valueOf's char[] + String alloc. */
     private void writeChar(char c) {
-        // worst case: "\uXXXX" (6) + 2 quotes = 8
+        // worst case: 6-byte \\u00XX escape + 2 quotes = 8
         ensure(8);
         byte[] b = buf;
         int p = n;

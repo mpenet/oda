@@ -642,7 +642,24 @@ public final class JsonParser {
                 throw err("leading zero in number");
             }
         } else if (c >= '1' && c <= '9') {
-            do {
+            mant = c - '0';
+            digits = 1;
+            intDigits = 1;
+            p++;
+            // SWAR: parse 8 digits at a time while we can accumulate without
+            // overflowing mant (10 accumulated + 8 more = 18 digits fits in
+            // long) and the buffer has at least 8 bytes remaining
+            while (p + 8 <= end && digits <= 10) {
+                long v = (long) LONG_LE.get(b, p);
+                if (!isEightDigits(v)) {
+                    break;
+                }
+                mant = mant * 100_000_000L + parse8Digits(v);
+                digits += 8;
+                intDigits += 8;
+                p += 8;
+            }
+            while (p < end && isDigit(b[p])) {
                 int d = b[p] - '0';
                 if (digits < 19) {
                     mant = mant * 10 + d;
@@ -653,7 +670,7 @@ public final class JsonParser {
                 }
                 intDigits++;
                 p++;
-            } while (p < end && isDigit(b[p]));
+            }
         } else {
             throw err("invalid number");
         }
@@ -740,6 +757,36 @@ public final class JsonParser {
 
     private static boolean isDigit(byte b) {
         return b >= '0' && b <= '9';
+    }
+
+    /**
+     * Returns true iff every byte of {@code v} (a LE-loaded 8-byte word) is
+     * an ASCII digit '0'..'9'. From Lemire's fast_float. Even though
+     * add/subtract can propagate borrows/carries across lanes, any invalid
+     * input causes at least one high bit in the OR result.
+     */
+    private static boolean isEightDigits(long v) {
+        return (((v + 0x4646464646464646L) | (v - 0x3030303030303030L))
+                & 0x8080808080808080L) == 0;
+    }
+
+    /**
+     * Parses 8 ASCII digits from a LE-loaded 8-byte word (byte 0 = leftmost
+     * digit) into an integer. Caller must have verified digits via
+     * {@link #isEightDigits(long)}.
+     *
+     * SWAR digit combining trick from Lemire / Alexandrescu.
+     */
+    private static int parse8Digits(long v) {
+        long lower = (v & 0x0f000f000f000f00L) >> 8;
+        long upper = (v & 0x000f000f000f000fL) * 10;
+        v = lower + upper;               // four 2-digit numbers (0..99) in 16-bit slots
+        lower = (v & 0x00ff000000ff0000L) >> 16;
+        upper = (v & 0x000000ff000000ffL) * 100;
+        v = lower + upper;               // two 4-digit numbers in 32-bit slots
+        lower = (v & 0x0000ffff00000000L) >> 32;
+        upper = (v & 0x000000000000ffffL) * 10000;
+        return (int) (lower + upper);
     }
 
     // --------------------------------------------------------------- literals

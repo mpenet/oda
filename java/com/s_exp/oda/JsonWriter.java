@@ -17,9 +17,14 @@ import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -67,15 +72,41 @@ public final class JsonWriter {
         }
     }
 
+    /** yyyy-MM-dd'T'HH:mm:ss'Z' at UTC, the cheshire/jsonista convention. */
+    private static final DateTimeFormatter DEFAULT_DATE_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
+
+    /** Pattern strings come from code, so this stays small in practice. */
+    private static final ConcurrentHashMap<String, DateTimeFormatter> DATE_FORMATTERS =
+            new ConcurrentHashMap<>();
+
+    private static DateTimeFormatter dateFormatter(Object df) {
+        if (df == null) {
+            return DEFAULT_DATE_FORMAT;
+        }
+        if (df instanceof DateTimeFormatter f) {
+            // Instant formatting needs a zone; default zone-less formatters to UTC
+            return f.getZone() == null ? f.withZone(ZoneOffset.UTC) : f;
+        }
+        if (df instanceof String s) {
+            return DATE_FORMATTERS.computeIfAbsent(s,
+                    p -> DateTimeFormatter.ofPattern(p).withZone(ZoneOffset.UTC));
+        }
+        throw new IllegalArgumentException(
+                "date-format must be a pattern String or DateTimeFormatter, got "
+                        + df.getClass().getName());
+    }
+
     private byte[] buf = new byte[1024];
     private int n;
     private IFn defaultFn;
+    private DateTimeFormatter dateFormat;
     private OutputStream out; // non-null = streaming mode: flush on overflow
 
     // ------------------------------------------------------------ public API
 
-    public static String writeString(Object x, IFn defaultFn) {
-        JsonWriter w = acquire(defaultFn);
+    public static String writeString(Object x, IFn defaultFn, Object dateFormat) {
+        JsonWriter w = acquire(defaultFn, dateFormat);
         try {
             w.writeValue(x);
             return new String(w.buf, 0, w.n, StandardCharsets.UTF_8);
@@ -84,8 +115,8 @@ public final class JsonWriter {
         }
     }
 
-    public static byte[] writeBytes(Object x, IFn defaultFn) {
-        JsonWriter w = acquire(defaultFn);
+    public static byte[] writeBytes(Object x, IFn defaultFn, Object dateFormat) {
+        JsonWriter w = acquire(defaultFn, dateFormat);
         try {
             w.writeValue(x);
             return Arrays.copyOf(w.buf, w.n);
@@ -99,8 +130,9 @@ public final class JsonWriter {
      * whenever it fills, so memory stays bounded by the buffer size (plus
      * the largest single string) regardless of document size.
      */
-    public static void writeStream(Object x, IFn defaultFn, OutputStream out) throws IOException {
-        JsonWriter w = acquire(defaultFn);
+    public static void writeStream(Object x, IFn defaultFn, Object dateFormat, OutputStream out)
+            throws IOException {
+        JsonWriter w = acquire(defaultFn, dateFormat);
         try {
             if (w.buf.length < (1 << 16)) {
                 w.buf = new byte[1 << 16];
@@ -128,7 +160,7 @@ public final class JsonWriter {
         }
     }
 
-    private static JsonWriter acquire(IFn defaultFn) {
+    private static JsonWriter acquire(IFn defaultFn, Object dateFormat) {
         JsonWriter w = POOL.poll();
         if (w == null) {
             w = new JsonWriter();
@@ -136,12 +168,14 @@ public final class JsonWriter {
             POOL_SIZE.decrementAndGet();
         }
         w.defaultFn = defaultFn;
+        w.dateFormat = dateFormatter(dateFormat);
         w.n = 0;
         return w;
     }
 
     private void release() {
         defaultFn = null;
+        dateFormat = null;
         // don't pin giant scratch buffers in the pool
         if (buf.length > (1 << 23)) {
             buf = new byte[1 << 16];
@@ -200,6 +234,11 @@ public final class JsonWriter {
             writeJsonString(u.toString());
         } else if (x instanceof Symbol sym) {
             writeJsonString(sym.toString());
+        } else if (x instanceof Date d) {
+            // not toInstant(): java.sql.Date/Time override it to throw
+            writeJsonString(dateFormat.format(Instant.ofEpochMilli(d.getTime())));
+        } else if (x instanceof Instant i) {
+            writeJsonString(dateFormat.format(i));
         } else if (x instanceof Map<?, ?> jm) {
             writeJavaMap(jm);
         } else if (x instanceof Iterable<?> it) {
@@ -431,28 +470,42 @@ public final class JsonWriter {
 
     /**
      * SIMD path: bulk-encodes clean ASCII runs, handling dirty chars one at
-     * a time in between. Two consecutive low-progress vector probes mean the
-     * string is dirty-dense: bail to the scalar loop for the rest.
+     * a time in between.
+     *
+     * A probe that returns fewer than a full vector of clean chars means
+     * the next dirty char is close: one wasted mask round-trip per unit
+     * eats the win on strings with regularly spaced unicode (e.g. ~21
+     * ASCII + non-BMP repeated). On the first such probe we bail out to
+     * the scalar path for the rest of the string.
      */
     private int encodeVector(char[] cs, int len, int p) {
         int i = 0;
-        int poor = 0;
-        while (i < len) {
-            if (poor >= 2 || len - i < 8) {
-                return encodeScalar(cs, i, len, p);
-            }
+        while (i < len && len - i >= VectorScan.SHORT_LANES) {
             int k = VectorScan.encodeAscii(cs, i, len, buf, p);
             i += k;
             p += k;
-            poor = k >= 8 ? 0 : poor + 1;
             if (i >= len) {
-                break;
+                return p;
+            }
+            if (k < VectorScan.SHORT_LANES) {
+                // short clean run — vector setup cost dominates, hand the
+                // rest (including this dirty char) to the scalar encoder
+                return encodeScalar(cs, i, len, p);
             }
             long r = encodeDirty(cs, i, len, p);
             i = (int) (r >>> 32);
             p = (int) r;
+            // regularly spaced unicode (e.g. surrogate pair after a BMP
+            // symbol) shows up as two dirty chars in a row; the next probe
+            // would return k=0 (wasted mask round-trip). Peek and bail.
+            if (i < len) {
+                char c = cs[i];
+                if (c < 0x20 || c >= 0x80 || c == '"' || c == '\\') {
+                    return encodeScalar(cs, i, len, p);
+                }
+            }
         }
-        return p;
+        return encodeScalar(cs, i, len, p);
     }
 
     /** Encodes the single (dirty) char at i; returns (newI << 32) | newP. */
@@ -504,16 +557,34 @@ public final class JsonWriter {
         return ((long) i << 32) | p;
     }
 
-    /** The plain scalar encode loop; also the fallback tail for the SIMD path. */
+    /**
+     * Scalar encode: scans for the end of each clean-ASCII run, bulk-copies
+     * it into the byte buffer (JIT-vectorized narrow-copy idiom), then
+     * handles the single dirty char before restarting the scan. Splitting
+     * the scan from the copy lets the copy loop stay branch-free.
+     */
     private int encodeScalar(char[] cs, int i, int len, int p) {
         byte[] b = buf;
         while (i < len) {
+            int j = i;
+            while (j < len) {
+                char c = cs[j];
+                if (c < 0x20 || c >= 0x80 || c == '"' || c == '\\') {
+                    break;
+                }
+                j++;
+            }
+            for (int k = i; k < j; k++) {
+                b[p++] = (byte) cs[k];
+            }
+            i = j;
+            if (i >= len) {
+                return p;
+            }
             char c = cs[i];
             if (c < 0x80) {
                 byte esc = ESCAPE[c];
-                if (esc == 0) {
-                    b[p++] = (byte) c;
-                } else if (esc == 'u') {
+                if (esc == 'u') {
                     b[p++] = '\\';
                     b[p++] = 'u';
                     b[p++] = '0';

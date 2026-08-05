@@ -69,7 +69,7 @@ final class VectorScan {
     // simple narrowing on every platform supporting the Vector API
     private static final VectorSpecies<Short> SHORT_SPECIES = ShortVector.SPECIES_128;
     private static final VectorSpecies<Byte> NARROW_SPECIES = ByteVector.SPECIES_64;
-    private static final int SHORT_LANES = SHORT_SPECIES.length();
+    static final int SHORT_LANES = SHORT_SPECIES.length();
 
     /**
      * Encodes chars that need no escaping and no multi-byte UTF-8

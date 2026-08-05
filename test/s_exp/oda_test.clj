@@ -312,6 +312,19 @@
     (oda/write [s] out)
     (is (= [s] (oda/parse (.toByteArray out))))))
 
+(deftest writer-dates
+  (let [epoch (java.util.Date. 0)]
+    (is (= "\"1970-01-01T00:00:00Z\"" (oda/write-str epoch)))
+    (is (= "\"1970-01-01T00:00:00Z\"" (oda/write-str (java.time.Instant/EPOCH))))
+    (is (= "\"1970-01-01T00:00:00Z\"" (oda/write-str (java.sql.Timestamp. 0))))
+    (is (= "\"1970-01-01\"" (oda/write-str epoch {:date-format "yyyy-MM-dd"})))
+    (is (= "\"1970/01/01 00:00\""
+           (oda/write-str (java.time.Instant/EPOCH)
+                          {:date-format (java.time.format.DateTimeFormatter/ofPattern
+                                         "yyyy/MM/dd HH:mm")})))
+    (is (= "{\"at\":\"1970-01-01T00:00:00Z\"}" (oda/write-str {:at epoch})))
+    (is (thrown? IllegalArgumentException (oda/write-str epoch {:date-format 42})))))
+
 (deftest writer-lone-surrogate
   ;; lone surrogates cannot be encoded as UTF-8; we emit U+FFFD
   (is (= "\"�\"" (oda/write-str (String. (char-array [(char 0xD800)]))))))

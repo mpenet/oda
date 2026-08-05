@@ -58,12 +58,14 @@ git checkout instead, compile it once with `clj -T:build javac`.
 | option | default | |
 |---|---|---|
 | `:default-fn` | `nil` | called on values of unsupported types, must return a writable value; without it unsupported types throw |
+| `:date-format` | `yyyy-MM-dd'T'HH:mm:ss'Z'` (UTC) | format for `java.util.Date`/`java.time.Instant` values: a pattern string or a `DateTimeFormatter` (zone-less formatters default to UTC) |
 
 ### Supported types (write)
 
 Maps (keys: keyword, string, symbol, number), vectors, sets, seqs,
-`java.util.Map`/`Iterable`, strings, keywords, symbols, chars, UUIDs, all
-JVM numbers (Ratio written as double), booleans, nil. NaN/Infinity throw.
+`java.util.Map`/`Iterable`, strings, keywords, symbols, chars, UUIDs,
+`java.util.Date`/`java.time.Instant` (see `:date-format`), all JVM numbers
+(Ratio written as double), booleans, nil. NaN/Infinity throw.
 
 ## Performance
 
@@ -74,13 +76,13 @@ Vector API enabled (see below).
 
 | payload | read | read (SIMD) | write | write (SIMD) |
 |---|---|---|---|---|
-| number-heavy | **2.2x** | **2.3x** | 1.3x | 1.2x |
-| small objects, repeated keys | **2.0x** | **1.8x** | 1.2x | 1.3x |
-| citm_catalog | **1.5x** | **1.6x** | **2.6x** | **2.4x** |
-| long ASCII strings | **1.5x** | **3.6x** | 1.2x | **4.4x** |
-| twitter.json | 1.1x | 1.2x | **1.9x** | **2.3x** |
-| string-heavy (raw UTF-8) | 1.1x | 1.3x | 0.9x | 0.9x |
-| string-heavy (\uXXXX escapes) | 0.9x | 1.0x | 0.9x | 0.9x |
+| number-heavy | **2.2x** | **2.3x** | 1.2x | 1.3x |
+| small objects, repeated keys | **2.0x** | **1.8x** | 1.2x | 1.2x |
+| citm_catalog | **1.5x** | **1.6x** | **2.6x** | **2.5x** |
+| long ASCII strings | **1.5x** | **3.6x** | 1.2x | **4.8x** |
+| twitter.json | 1.1x | 1.2x | **2.0x** | **2.0x** |
+| string-heavy (raw UTF-8) | 1.1x | 1.3x | **1.1x** | **1.1x** |
+| string-heavy (\uXXXX escapes) | 0.9x | 1.0x | **1.1x** | **1.1x** |
 
 Jackson's escaped-string writer is bimodal across JVM forks (~1.5ms or
 ~4ms per op on the string payloads); the ratios above use its fast mode.

@@ -4,12 +4,14 @@
 
 Fast JSON parser/writer for Clojure. Zero dependencies, JDK 25+.
 
-oda works directly on UTF-8 bytes and builds Clojure persistent data
-structures without intermediate representations. It is **faster than
-Jackson-backed libraries** (jsonista, cheshire) across typical workloads, on
-both read and write, with **optional SIMD string scanning via the Vector API**
-(`--add-modules jdk.incubator.vector`) for an extra boost on string-heavy
-documents — see [Optional SIMD](#optional-simd).
+oda is **fast, low-allocation, and correct**: it outperforms Jackson-backed
+libraries (jsonista, cheshire) on every workload we bench, read and write,
+allocates 2-5x less per operation, and is validated against the full
+[JSONTestSuite](https://github.com/nst/JSONTestSuite) corpus with bit-exact
+double parsing and writing (see [Correctness](#correctness)).
+
+Enabling the (incubating) Vector API adds SIMD string scanning for an
+extra boost on string-heavy documents — see [Optional SIMD](#optional-simd).
 
 > Status: alpha. API may still move.
 
@@ -111,10 +113,14 @@ Without the module oda silently uses its scalar (SWAR) paths.
 
 ## Correctness
 
-- full [JSONTestSuite](https://github.com/nst/JSONTestSuite) corpus
-- differential testing against jsonista (corpus + generative)
-- doubles are correctly rounded (Eisel-Lemire, validated bit-exact against
-  `Double/parseDouble` on torture values and generative corpora)
+- full [JSONTestSuite](https://github.com/nst/JSONTestSuite) corpus (all
+  `y_`/`n_`/`i_` cases)
+- differential testing against jsonista on the corpus and on generative
+  payloads (test.check)
+- doubles are correctly rounded on both sides: Eisel-Lemire parsing and
+  Ryū writing, validated bit-exact against `Double/parseDouble` on
+  torture values plus thousands of generated round-trips
+- write→parse round-trip properties on random Clojure structures
 - duplicate object keys: last wins
 
 ## Design notes

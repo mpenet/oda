@@ -1,5 +1,0 @@
-* jsonparseexception -> ex-info with type, maybe
-* dates/instant support? 
-* optimizations
-** Fused ws-skip + token dispatch (read) nextToken() returning first non-ws byte instead of skipWs-then-reread per token; restructure parseObject/parseArray/parseValue
-** Own UTF-8 decode for string values (read)","description":"Replace String(bytes, UTF_8) two-pass decode with hand-rolled UTF-8→UTF-16 into reused char[] then String(char[]) — kills JDK intermediate copies on non-ASCII values.

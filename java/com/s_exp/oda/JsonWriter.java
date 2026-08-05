@@ -893,14 +893,13 @@ public final class JsonWriter {
     }
 
     private void writeRawAscii(String s) {
-        int len = s.length();
-        ensure(len);
-        byte[] b = buf;
-        int p = n;
-        for (int i = 0; i < len; i++) {
-            b[p + i] = (byte) s.charAt(i);
-        }
-        n = p + len;
+        // getBytes(ISO_8859_1) is intrinsified and cheaper than a per-char
+        // narrow-copy loop for the sizes we see here (BigDecimal/BigInteger/
+        // BigInt/Float toString outputs). Callers guarantee ASCII content.
+        byte[] src = s.getBytes(StandardCharsets.ISO_8859_1);
+        ensure(src.length);
+        System.arraycopy(src, 0, buf, n, src.length);
+        n += src.length;
     }
 
     private void ensure(int k) {

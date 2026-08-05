@@ -191,6 +191,13 @@ public final class JsonWriter {
 
     // -------------------------------------------------------------- dispatch
 
+    /**
+     * Type dispatch ordered by expected frequency in typical Clojure JSON,
+     * with structural types (IPersistentMap, Iterable) hoisted so that
+     * vector/seq/set values don't fall through the numeric+temporal chain
+     * on every element. IPersistentMap must precede Iterable because
+     * APersistentMap implements Iterable.
+     */
     private void writeValue(Object x) {
         if (x == null) {
             writeRaw(NULL_BYTES);
@@ -200,14 +207,18 @@ public final class JsonWriter {
             writeLong(l);
         } else if (x instanceof Double d) {
             writeDouble(d);
+        } else if (x instanceof IPersistentMap m) {
+            writeMap(m);
+        } else if (x instanceof Iterable<?> it) {
+            writeIterable(it);
         } else if (x instanceof Keyword k) {
             writeKeywordValue(k);
         } else if (x instanceof Boolean b) {
             writeRaw(b ? TRUE_BYTES : FALSE_BYTES);
-        } else if (x instanceof IPersistentMap m) {
-            writeMap(m);
         } else if (x instanceof Integer i) {
             writeLong(i.longValue());
+        } else if (x instanceof Map<?, ?> jm) {
+            writeJavaMap(jm);
         } else if (x instanceof BigDecimal bd) {
             writeRawAscii(bd.toString());
         } else if (x instanceof BigInteger bi) {
@@ -229,7 +240,7 @@ public final class JsonWriter {
         } else if (x instanceof CharSequence cs) {
             writeJsonString(cs.toString());
         } else if (x instanceof Character c) {
-            writeJsonString(String.valueOf(c));
+            writeChar(c);
         } else if (x instanceof UUID u) {
             writeUuid(u);
         } else if (x instanceof Symbol sym) {
@@ -238,10 +249,6 @@ public final class JsonWriter {
             writeDateValue(d.getTime());
         } else if (x instanceof Instant i) {
             writeInstantValue(i);
-        } else if (x instanceof Map<?, ?> jm) {
-            writeJavaMap(jm);
-        } else if (x instanceof Iterable<?> it) {
-            writeIterable(it);
         } else if (defaultFn != null) {
             writeValue(defaultFn.invoke(x));
         } else {
@@ -707,6 +714,45 @@ public final class JsonWriter {
         }
         ensure(24);
         n = RyuDouble.write(buf, n, d);
+    }
+
+    /** Direct single-char write: skips String.valueOf's char[] + String alloc. */
+    private void writeChar(char c) {
+        // worst case: "\uXXXX" (6) + 2 quotes = 8
+        ensure(8);
+        byte[] b = buf;
+        int p = n;
+        b[p++] = '"';
+        if (c < 0x80) {
+            byte esc = ESCAPE[c];
+            if (esc == 0) {
+                b[p++] = (byte) c;
+            } else if (esc == 'u') {
+                b[p++] = '\\';
+                b[p++] = 'u';
+                b[p++] = '0';
+                b[p++] = '0';
+                b[p++] = HEX_DIGITS[(c >> 4) & 0xf];
+                b[p++] = HEX_DIGITS[c & 0xf];
+            } else {
+                b[p++] = '\\';
+                b[p++] = esc;
+            }
+        } else if (c < 0x800) {
+            b[p++] = (byte) (0xC0 | (c >> 6));
+            b[p++] = (byte) (0x80 | (c & 0x3F));
+        } else if (c >= 0xD800 && c <= 0xDFFF) {
+            // lone surrogate — no companion possible in a single char, U+FFFD
+            b[p++] = (byte) 0xEF;
+            b[p++] = (byte) 0xBF;
+            b[p++] = (byte) 0xBD;
+        } else {
+            b[p++] = (byte) (0xE0 | (c >> 12));
+            b[p++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+            b[p++] = (byte) (0x80 | (c & 0x3F));
+        }
+        b[p++] = '"';
+        n = p;
     }
 
     // ------------------------------------------------------------ UUID / dates

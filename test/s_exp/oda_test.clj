@@ -312,6 +312,14 @@
     (oda/write [s] out)
     (is (= [s] (oda/parse (.toByteArray out))))))
 
+(deftest writer-char-direct
+  ;; Character path bypasses String.valueOf allocation; must match
+  ;; String encoding on every char class
+  (doseq [c [\a \0 \space \" \\ \newline \tab \backspace \return
+             (char 0x1F) (char 0)
+             \é (char 0x0800) (char 0xD800)]]
+    (is (= (oda/write-str (str c)) (oda/write-str c)) (str "char " (int c)))))
+
 (deftest writer-uuid-vs-tostring
   ;; UUID direct-encode must match java.util.UUID.toString exactly on a
   ;; wide range of bit patterns including corner cases

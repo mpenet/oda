@@ -776,6 +776,8 @@ public final class JsonParser {
      * unsigned int, or -1 at end of input. Fused skip+peek: callers branch
      * on the return value instead of re-reading buf[pos].
      */
+    private static final long EIGHT_SPACES = 0x2020202020202020L;
+
     private int nextToken() {
         byte[] b = buf;
         int p = pos;
@@ -787,6 +789,13 @@ public final class JsonParser {
                 // JSON); compact JSON exits on the first check above
                 while (end - p >= 8) {
                     long w = (long) LONG_LE.get(b, p);
+                    // spaces dominate — pretty JSON with N-space indent has
+                    // long runs of aligned spaces; skip the expensive
+                    // 4-XOR nonWsMask when the whole word is spaces
+                    if (w == EIGHT_SPACES) {
+                        p += 8;
+                        continue;
+                    }
                     long m = nonWsMask(w);
                     if (m != 0) {
                         p += Long.numberOfTrailingZeros(m) >>> 3;

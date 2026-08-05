@@ -231,14 +231,13 @@ public final class JsonWriter {
         } else if (x instanceof Character c) {
             writeJsonString(String.valueOf(c));
         } else if (x instanceof UUID u) {
-            writeJsonString(u.toString());
+            writeUuid(u);
         } else if (x instanceof Symbol sym) {
             writeJsonString(sym.toString());
         } else if (x instanceof Date d) {
-            // not toInstant(): java.sql.Date/Time override it to throw
-            writeJsonString(dateFormat.format(Instant.ofEpochMilli(d.getTime())));
+            writeDateValue(d.getTime());
         } else if (x instanceof Instant i) {
-            writeJsonString(dateFormat.format(i));
+            writeInstantValue(i);
         } else if (x instanceof Map<?, ?> jm) {
             writeJavaMap(jm);
         } else if (x instanceof Iterable<?> it) {
@@ -708,6 +707,135 @@ public final class JsonWriter {
         }
         ensure(24);
         n = RyuDouble.write(buf, n, d);
+    }
+
+    // ------------------------------------------------------------ UUID / dates
+
+    /** Emits {@code "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"} directly, no alloc. */
+    private void writeUuid(UUID u) {
+        ensure(38);
+        long msb = u.getMostSignificantBits();
+        long lsb = u.getLeastSignificantBits();
+        byte[] b = buf;
+        int p = n;
+        b[p++] = '"';
+        p = writeHex(b, p, msb >>> 32, 8);
+        b[p++] = '-';
+        p = writeHex(b, p, msb >>> 16, 4);
+        b[p++] = '-';
+        p = writeHex(b, p, msb, 4);
+        b[p++] = '-';
+        p = writeHex(b, p, lsb >>> 48, 4);
+        b[p++] = '-';
+        p = writeHex(b, p, lsb, 12);
+        b[p++] = '"';
+        n = p;
+    }
+
+    private static int writeHex(byte[] b, int p, long v, int nChars) {
+        for (int i = nChars - 1; i >= 0; i--) {
+            b[p + i] = HEX_DIGITS[(int) v & 0xf];
+            v >>>= 4;
+        }
+        return p + nChars;
+    }
+
+    private void writeDateValue(long millis) {
+        if (dateFormat == DEFAULT_DATE_FORMAT) {
+            writeIsoInstant(millis);
+        } else {
+            // custom formatter: value-type Instant needed
+            writeJsonString(dateFormat.format(Instant.ofEpochMilli(millis)));
+        }
+    }
+
+    private void writeInstantValue(Instant i) {
+        if (dateFormat == DEFAULT_DATE_FORMAT) {
+            writeIsoInstant(i.toEpochMilli());
+        } else {
+            writeJsonString(dateFormat.format(i));
+        }
+    }
+
+    /**
+     * Emits {@code "yyyy-MM-ddTHH:mm:ssZ"} at UTC directly from epoch millis,
+     * no Instant/String allocation. Year formatted in 4 digits (1000-9999);
+     * outside that range falls back to {@code Integer.toString(year)} for
+     * the year portion (bounded by ensure() reservation).
+     *
+     * epochDay-to-y/m/d algorithm from java.time.LocalDate.ofEpochDay.
+     */
+    private void writeIsoInstant(long millis) {
+        long secondsSinceEpoch = Math.floorDiv(millis, 1000L);
+        int secondOfDay = (int) Math.floorMod(secondsSinceEpoch, 86400L);
+        long epochDay = Math.floorDiv(secondsSinceEpoch, 86400L);
+
+        long zeroDay = epochDay + 719528L - 60L;
+        long adjust = 0;
+        if (zeroDay < 0) {
+            long adjustCycles = (zeroDay + 1) / 146097L - 1;
+            adjust = adjustCycles * 400;
+            zeroDay += -adjustCycles * 146097L;
+        }
+        long yearEst = (400 * zeroDay + 591) / 146097L;
+        long doyEst = zeroDay - (365 * yearEst + yearEst / 4 - yearEst / 100 + yearEst / 400);
+        if (doyEst < 0) {
+            yearEst--;
+            doyEst = zeroDay - (365 * yearEst + yearEst / 4 - yearEst / 100 + yearEst / 400);
+        }
+        yearEst += adjust;
+        int marchDoy0 = (int) doyEst;
+        int marchMonth0 = (marchDoy0 * 5 + 2) / 153;
+        int month = (marchMonth0 + 2) % 12 + 1;
+        int dom = marchDoy0 - (marchMonth0 * 306 + 5) / 10 + 1;
+        yearEst += marchMonth0 / 10;
+        int year = (int) yearEst;
+
+        int hour = secondOfDay / 3600;
+        int minute = (secondOfDay / 60) % 60;
+        int second = secondOfDay % 60;
+
+        // "yyyy-MM-ddTHH:mm:ssZ" + 2 quotes = 22 bytes for years 0-9999
+        ensure(24);
+        byte[] b = buf;
+        int p = n;
+        b[p++] = '"';
+        if (year >= 0 && year <= 9999) {
+            b[p++] = (byte) ('0' + year / 1000);
+            int y3 = year % 1000;
+            b[p++] = (byte) ('0' + y3 / 100);
+            int y2 = y3 % 100;
+            b[p++] = DIGIT_PAIRS[y2 * 2];
+            b[p++] = DIGIT_PAIRS[y2 * 2 + 1];
+        } else {
+            // very rare, out-of-normal-range years: length varies; ensure it
+            String yStr = Integer.toString(year);
+            n = p;
+            ensure(yStr.length() + 18);
+            b = buf;
+            p = n;
+            for (int i = 0; i < yStr.length(); i++) {
+                b[p++] = (byte) yStr.charAt(i);
+            }
+        }
+        b[p++] = '-';
+        b[p++] = DIGIT_PAIRS[month * 2];
+        b[p++] = DIGIT_PAIRS[month * 2 + 1];
+        b[p++] = '-';
+        b[p++] = DIGIT_PAIRS[dom * 2];
+        b[p++] = DIGIT_PAIRS[dom * 2 + 1];
+        b[p++] = 'T';
+        b[p++] = DIGIT_PAIRS[hour * 2];
+        b[p++] = DIGIT_PAIRS[hour * 2 + 1];
+        b[p++] = ':';
+        b[p++] = DIGIT_PAIRS[minute * 2];
+        b[p++] = DIGIT_PAIRS[minute * 2 + 1];
+        b[p++] = ':';
+        b[p++] = DIGIT_PAIRS[second * 2];
+        b[p++] = DIGIT_PAIRS[second * 2 + 1];
+        b[p++] = 'Z';
+        b[p++] = '"';
+        n = p;
     }
 
     // ------------------------------------------------------------------ misc

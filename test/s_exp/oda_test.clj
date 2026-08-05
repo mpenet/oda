@@ -312,6 +312,43 @@
     (oda/write [s] out)
     (is (= [s] (oda/parse (.toByteArray out))))))
 
+(deftest writer-uuid-vs-tostring
+  ;; UUID direct-encode must match java.util.UUID.toString exactly on a
+  ;; wide range of bit patterns including corner cases
+  (doseq [msb [0 -1 1 Long/MAX_VALUE Long/MIN_VALUE (unchecked-long 0x1234567890abcdef)]
+          lsb [0 -1 1 (unchecked-long 0xfedcba0987654321) Long/MAX_VALUE]]
+    (let [u (java.util.UUID. msb lsb)]
+      (is (= (str "\"" u "\"") (oda/write-str u)))))
+  (dotimes [_ 200]
+    (let [u (random-uuid)]
+      (is (= (str "\"" u "\"") (oda/write-str u))))))
+
+(deftest writer-iso-instant-vs-formatter
+  ;; zero-alloc ISO writer must match the DateTimeFormatter output exactly
+  (let [f (.withZone (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss'Z'")
+                     java.time.ZoneOffset/UTC)]
+    (doseq [ms [0                          ; epoch
+                1000                       ; 1970-01-01T00:00:01
+                (- (* 365 86400 1000))     ; year 1969
+                (* 1000 86400 400)         ; leap-day cycle boundary
+                (long 1e12)
+                (long 4e12)
+                253402300799000            ; 9999-12-31T23:59:59
+                -30610224000000]]          ; 1000-01-01T00:00:00
+      (let [i (java.time.Instant/ofEpochMilli ms)
+            expected (str "\"" (.format f i) "\"")]
+        (is (= expected (oda/write-str (java.util.Date. ms))) (str "Date " ms))
+        (is (= expected (oda/write-str i)) (str "Instant " ms))))))
+
+(defspec iso-instant-random-differential 500
+  (prop/for-all [ms (gen/choose -62135596800000 253402300799000)]  ; 0000..9999 CE range
+                (let [f (.withZone (java.time.format.DateTimeFormatter/ofPattern
+                                    "yyyy-MM-dd'T'HH:mm:ss'Z'")
+                                   java.time.ZoneOffset/UTC)
+                      i (java.time.Instant/ofEpochMilli ms)
+                      expected (str "\"" (.format f i) "\"")]
+                  (= expected (oda/write-str i)))))
+
 (deftest writer-dates
   (let [epoch (java.util.Date. 0)]
     (is (= "\"1970-01-01T00:00:00Z\"" (oda/write-str epoch)))

@@ -1,6 +1,6 @@
 # oda
 
-[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/hako.svg)](https://clojars.org/com.s-exp/hako)
+[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/oda.svg)](https://clojars.org/com.s-exp/oda)
 
 Fast JSON parser/writer for Clojure. Zero dependencies, JDK 25+.
 
@@ -15,7 +15,7 @@ documents — see [Optional SIMD](#optional-simd).
 
 ## Installation
 
-[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/hako.svg)](https://clojars.org/com.s-exp/hako)
+[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/oda.svg)](https://clojars.org/com.s-exp/oda)
 
 Requires JDK 25+. The jar ships the compiled Java core; when working from a
 git checkout instead, compile it once with `clj -T:build javac`.

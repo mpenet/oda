@@ -87,7 +87,7 @@ Vector API enabled (see below).
 Jackson's escaped-string writer is bimodal across JVM forks (~1.5ms or
 ~4ms per op on the string payloads); the ratios above use its fast mode.
 
-oda also allocates 2-5x less than jsonista per operation on most payloads
+oda also **allocates 2-5x less than jsonista per operation on most payloads**
 (e.g. citm read: 1.4MB vs 7.9MB per op). **Writes allocate nothing beyond
 the returned array** (numbers included, via a Ryū port). Reproduce with:
 
@@ -99,14 +99,6 @@ clj -M:jmh quick vector    # or: full, scalar, plus payload/benchmark names
 
 With the (incubating) Vector API enabled, string scanning and encoding go
 16 bytes at a time. 
-
-Measured A/B deltas against oda's own scalar paths: 
-
-* long pure-ASCII strings: read **~2.3x**, write **~4.4x**
-* raw string-heavy read **+22%**
-* string-heavy writes **+5-6%**
-* short-string payloads unaffected (a run-length heuristic keeps them on the scalar path). 
-
 
 Enable with:
 

@@ -36,27 +36,32 @@
   "Writes `x` as a JSON String.
 
   Options:
-  * `:default-fn`  - called on values of unsupported types, must return a
-    writable value. Without it, unsupported types throw.
+  * `:default-fn`  - called on values that cannot be written natively — both
+    unsupported types AND supported types with unrepresentable values
+    (NaN/Infinity Float/Double). Must return a writable value. Without it,
+    those cases throw.
+  * `:key-fn`      - transforms each map key before dispatch. Use to handle
+    nil keys, custom types, or normalize keys. Takes the key, returns any
+    writable key (String, Keyword, Symbol, Number).
   * `:date-format` - format for java.util.Date and java.time.Instant values:
     a pattern string or a java.time.format.DateTimeFormatter (zone-less
     formatters default to UTC). Default: yyyy-MM-dd'T'HH:mm:ss'Z' at UTC."
   (^String [x]
-   (JsonWriter/writeString x nil nil))
-  (^String [x {:keys [default-fn date-format]}]
-   (JsonWriter/writeString x ^IFn default-fn date-format)))
+   (JsonWriter/writeString x nil nil nil))
+  (^String [x {:keys [default-fn key-fn date-format]}]
+   (JsonWriter/writeString x ^IFn default-fn ^IFn key-fn date-format)))
 
 (defn write-bytes
   "Writes `x` as JSON UTF-8 encoded byte-array. See `write-str` for options."
   (^bytes [x]
-   (JsonWriter/writeBytes x nil nil))
-  (^bytes [x {:keys [default-fn date-format]}]
-   (JsonWriter/writeBytes x ^IFn default-fn date-format)))
+   (JsonWriter/writeBytes x nil nil nil))
+  (^bytes [x {:keys [default-fn key-fn date-format]}]
+   (JsonWriter/writeBytes x ^IFn default-fn ^IFn key-fn date-format)))
 
 (defn write
   "Writes `x` as JSON to `out` (OutputStream), flushes, does not close.
   See `write-str` for options."
   ([x ^OutputStream out]
-   (JsonWriter/writeStream x nil nil out))
-  ([x ^OutputStream out {:keys [default-fn date-format]}]
-   (JsonWriter/writeStream x ^IFn default-fn date-format out)))
+   (JsonWriter/writeStream x nil nil nil out))
+  ([x ^OutputStream out {:keys [default-fn key-fn date-format]}]
+   (JsonWriter/writeStream x ^IFn default-fn ^IFn key-fn date-format out)))

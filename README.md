@@ -57,7 +57,8 @@ git checkout instead, compile it once with `clj -T:build javac`.
 
 | option | default | |
 |---|---|---|
-| `:default-fn` | `nil` | called on values of unsupported types, must return a writable value; without it unsupported types throw |
+| `:default-fn` | `nil` | called on values that cannot be written natively — unsupported types AND supported types with unrepresentable values (NaN/Infinity Float/Double). Must return a writable value; without it those cases throw |
+| `:key-fn` | `nil` | transforms each map key before dispatch. Use to handle `nil` keys, custom types, or normalize keys. Takes the key, returns any writable key (String, Keyword, Symbol, Number) |
 | `:date-format` | `yyyy-MM-dd'T'HH:mm:ss'Z'` (UTC) | format for `java.util.Date`/`java.time.Instant` values: a pattern string or a `DateTimeFormatter` (zone-less formatters default to UTC) |
 
 ### Supported types (write)
@@ -65,7 +66,8 @@ git checkout instead, compile it once with `clj -T:build javac`.
 Maps (keys: keyword, string, symbol, number), vectors, sets, seqs,
 `java.util.Map`/`Iterable`, strings, keywords, symbols, chars, UUIDs,
 `java.util.Date`/`java.time.Instant` (see `:date-format`), all JVM numbers
-(Ratio written as double), booleans, nil. NaN/Infinity throw.
+(Ratio written as double), booleans, nil. NaN/Infinity throw unless
+`:default-fn` is provided.
 
 ## Performance
 

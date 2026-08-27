@@ -100,13 +100,14 @@ public final class JsonWriter {
     private byte[] buf = new byte[1024];
     private int n;
     private IFn defaultFn;
+    private IFn keyFn;
     private DateTimeFormatter dateFormat;
     private OutputStream out; // non-null = streaming mode: flush on overflow
 
     // ------------------------------------------------------------ public API
 
-    public static String writeString(Object x, IFn defaultFn, Object dateFormat) {
-        JsonWriter w = acquire(defaultFn, dateFormat);
+    public static String writeString(Object x, IFn defaultFn, IFn keyFn, Object dateFormat) {
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat);
         try {
             w.writeValue(x);
             return new String(w.buf, 0, w.n, StandardCharsets.UTF_8);
@@ -115,8 +116,8 @@ public final class JsonWriter {
         }
     }
 
-    public static byte[] writeBytes(Object x, IFn defaultFn, Object dateFormat) {
-        JsonWriter w = acquire(defaultFn, dateFormat);
+    public static byte[] writeBytes(Object x, IFn defaultFn, IFn keyFn, Object dateFormat) {
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat);
         try {
             w.writeValue(x);
             return Arrays.copyOf(w.buf, w.n);
@@ -130,9 +131,10 @@ public final class JsonWriter {
      * whenever it fills, so memory stays bounded by the buffer size (plus
      * the largest single string) regardless of document size.
      */
-    public static void writeStream(Object x, IFn defaultFn, Object dateFormat, OutputStream out)
+    public static void writeStream(Object x, IFn defaultFn, IFn keyFn,
+                                   Object dateFormat, OutputStream out)
             throws IOException {
-        JsonWriter w = acquire(defaultFn, dateFormat);
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat);
         try {
             if (w.buf.length < (1 << 16)) {
                 w.buf = new byte[1 << 16];
@@ -160,7 +162,7 @@ public final class JsonWriter {
         }
     }
 
-    private static JsonWriter acquire(IFn defaultFn, Object dateFormat) {
+    private static JsonWriter acquire(IFn defaultFn, IFn keyFn, Object dateFormat) {
         JsonWriter w = POOL.poll();
         if (w == null) {
             w = new JsonWriter();
@@ -168,6 +170,7 @@ public final class JsonWriter {
             POOL_SIZE.decrementAndGet();
         }
         w.defaultFn = defaultFn;
+        w.keyFn = keyFn;
         w.dateFormat = dateFormatter(dateFormat);
         w.n = 0;
         return w;
@@ -175,6 +178,7 @@ public final class JsonWriter {
 
     private void release() {
         defaultFn = null;
+        keyFn = null;
         dateFormat = null;
         // don't pin giant scratch buffers in the pool
         if (buf.length > (1 << 23)) {
@@ -228,6 +232,10 @@ public final class JsonWriter {
         } else if (x instanceof Float f) {
             float fv = f;
             if (Float.isNaN(fv) || Float.isInfinite(fv)) {
+                if (defaultFn != null) {
+                    writeValue(defaultFn.invoke(f));
+                    return;
+                }
                 throw new IllegalArgumentException("JSON cannot represent " + fv);
             }
             writeRawAscii(Float.toString(fv));
@@ -387,6 +395,9 @@ public final class JsonWriter {
     }
 
     private void writeKey(Object k) {
+        if (keyFn != null) {
+            k = keyFn.invoke(k);
+        }
         if (k instanceof Keyword kw) {
             writeKeywordKey(kw);
         } else if (k instanceof String s) {
@@ -710,6 +721,10 @@ public final class JsonWriter {
 
     private void writeDouble(double d) {
         if (Double.isNaN(d) || Double.isInfinite(d)) {
+            if (defaultFn != null) {
+                writeValue(defaultFn.invoke(Double.valueOf(d)));
+                return;
+            }
             throw new IllegalArgumentException("JSON cannot represent " + d);
         }
         ensure(24);

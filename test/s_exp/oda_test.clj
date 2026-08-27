@@ -357,6 +357,39 @@
                       expected (str "\"" (.format f i) "\"")]
                   (= expected (oda/write-str i)))))
 
+(deftest writer-default-fn-on-nan-inf
+  ;; :default-fn must catch NaN/Infinity on both Double and Float
+  (is (thrown? IllegalArgumentException (oda/write-str ##NaN)))
+  (is (= "\"NaN\"" (oda/write-str ##NaN {:default-fn str})))
+  (is (= "\"Infinity\"" (oda/write-str ##Inf {:default-fn str})))
+  (is (= "\"-Infinity\"" (oda/write-str ##-Inf {:default-fn str})))
+  (is (= "null" (oda/write-str ##NaN {:default-fn (constantly nil)})))
+  ;; nested in a map — :default-fn fires inside dispatch
+  (is (= "{\"a\":\"NaN\"}" (oda/write-str {:a ##NaN} {:default-fn str})))
+  ;; Float NaN too
+  (is (= "\"NaN\"" (oda/write-str (Float/valueOf Float/NaN) {:default-fn str})))
+  (is (= "\"Infinity\"" (oda/write-str (Float/valueOf Float/POSITIVE_INFINITY)
+                                       {:default-fn str}))))
+
+(deftest writer-key-fn
+  ;; :key-fn transforms keys before dispatch
+  (is (= "{\"a\":1}" (oda/write-str {:a 1} {:key-fn name})))
+  (is (= "{\"A\":1,\"B\":2}"
+         (oda/write-str {:a 1 :b 2} {:key-fn (comp str/upper-case name)})))
+  ;; handles nil key — currently a nil key would throw
+  (is (thrown? IllegalArgumentException (oda/write-str {nil 1})))
+  (is (= "{\"__nil__\":1}"
+         (oda/write-str {nil 1} {:key-fn #(if (nil? %) "__nil__" %)})))
+  ;; identity fn — no change
+  (is (= "{\"a\":1}" (oda/write-str {:a 1} {:key-fn identity})))
+  ;; returning a keyword — normal keyword dispatch (via KwFrag cache)
+  (is (= "{\"prefixed/x\":1}"
+         (oda/write-str {:x 1} {:key-fn #(keyword "prefixed" (name %))})))
+  ;; combined with :default-fn: key-fn fires first, unusual keys still fail
+  ;; unless converted properly
+  (is (= "{\"1\":\"NaN\"}"
+         (oda/write-str {1 ##NaN} {:key-fn str :default-fn str}))))
+
 (deftest writer-dates
   (let [epoch (java.util.Date. 0)]
     (is (= "\"1970-01-01T00:00:00Z\"" (oda/write-str epoch)))

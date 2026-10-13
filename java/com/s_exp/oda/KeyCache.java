@@ -1,3 +1,6 @@
+// ABOUTME: Lock-free bounded caches mapping raw key bytes to canonical key objects.
+// ABOUTME: Lets the parser skip decoding and key-fn calls for repeated object keys.
+
 package com.s_exp.oda;
 
 import java.lang.invoke.MethodHandles;
@@ -31,6 +34,13 @@ final class KeyCache {
     /** Shared tables for the two canonical key modes. */
     static final Entry[] KEYWORDS = new Entry[GLOBAL_SIZE];
     static final Entry[] STRINGS = new Entry[GLOBAL_SIZE];
+
+    /**
+     * Longest key (in bytes) eligible for caching. Tables outlive parses, so
+     * this bounds the memory hostile input can pin; real-world keys repeat
+     * and are short, long ones gain little from canonicalization.
+     */
+    static final int MAX_KEY_LENGTH = 64;
 
     /** Size of the per-parse table used with a custom key-fn. */
     static final int CUSTOM_SIZE = 512;

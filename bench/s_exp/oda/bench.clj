@@ -1,3 +1,6 @@
+;; ABOUTME: Criterium benchmarks comparing oda against jsonista and cheshire.
+;; ABOUTME: Quick interactive measurements; JMH (jmh.clj) is the rigorous harness.
+
 (ns s-exp.oda.bench
   (:require [criterium.core :as cc]
             [jsonista.core :as j]

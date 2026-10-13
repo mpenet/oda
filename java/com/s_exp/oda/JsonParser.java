@@ -1,6 +1,10 @@
+// ABOUTME: JSON parser producing Clojure persistent data straight from UTF-8 bytes.
+// ABOUTME: Fused tokenizer/builder with SWAR (and optional SIMD) scanning.
+
 package com.s_exp.oda;
 
 import clojure.lang.IFn;
+import clojure.lang.ITransientCollection;
 import clojure.lang.ITransientMap;
 import clojure.lang.Keyword;
 import clojure.lang.LazilyPersistentVector;
@@ -9,9 +13,11 @@ import clojure.lang.PersistentHashMap;
 import clojure.lang.PersistentVector;
 import clojure.lang.RT;
 import clojure.lang.Util;
+import clojure.lang.Var;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -87,22 +93,34 @@ public final class JsonParser {
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private final byte[] buf;
+    private final int begin;
     private final int end;
     private final int keyMode;
     private final IFn keyFn;
     private final KeyCache.Entry[] keyTable;
     private final int maxDepth;
+    private final int maxNumberLength;
+    private final boolean bigdec;
     private int pos;
 
     private char[] cbuf = new char[64];
     private Object[][] kvBufs = new Object[16][];
     private Object[][] valBufs = new Object[16][];
 
-    private JsonParser(byte[] buf, int offset, int length, IFn keyFn, int maxDepth) {
+    private JsonParser(byte[] buf, int offset, int length, IFn keyFn, int maxDepth,
+                       int maxNumberLength, boolean bigdec) {
         this.buf = buf;
+        this.begin = offset;
         this.pos = offset;
         this.end = offset + length;
         this.maxDepth = maxDepth;
+        this.maxNumberLength = maxNumberLength;
+        this.bigdec = bigdec;
+        if (keyFn instanceof Var v) {
+            // resolve per parse: the cache is keyed by fn identity, so a
+            // var must not pin the results of the fn it held when first used
+            keyFn = (IFn) v.deref();
+        }
         if (keyFn == null) {
             this.keyMode = KEY_STRINGS;
             this.keyTable = KeyCache.STRINGS;
@@ -128,9 +146,15 @@ public final class JsonParser {
      * them as Strings, clojure.core/keyword (recognized by identity) interns
      * them as Keywords without invoking the fn, any other fn is invoked with
      * the key String on cache misses (and must therefore be pure).
+     * Numbers longer than maxNumberLength chars are rejected: converting
+     * huge ones (BigInteger, BigDecimal) is superlinear. bigdec reads
+     * non-integer numbers as exact BigDecimals instead of doubles. A leading
+     * UTF-8 byte order mark is skipped.
      */
-    public static Object parse(byte[] buf, int offset, int length, IFn keyFn, int maxDepth) {
-        JsonParser p = new JsonParser(buf, offset, length, keyFn, maxDepth);
+    public static Object parse(byte[] buf, int offset, int length, IFn keyFn, int maxDepth,
+                               int maxNumberLength, boolean bigdec) {
+        JsonParser p = new JsonParser(buf, offset, length, keyFn, maxDepth, maxNumberLength, bigdec);
+        p.skipByteOrderMark();
         int c = p.nextToken();
         Object v = p.parseValue(0, c);
         if (p.nextToken() != -1) {
@@ -289,6 +313,9 @@ public final class JsonParser {
                 if (high == 0) {
                     pos = p + 1;
                     int len = p - start;
+                    if (len > KeyCache.MAX_KEY_LENGTH) {
+                        return keyFor(new String(b, start, len, StandardCharsets.ISO_8859_1));
+                    }
                     if (pendShift != 0) {
                         h = KeyCache.mix(h, pend);
                     }
@@ -363,13 +390,29 @@ public final class JsonParser {
                 c = nextToken();
             } else if (c == ']') {
                 pos++;
-                return LazilyPersistentVector.createOwning(Arrays.copyOf(vals, n));
+                return buildVector(vals, n);
             } else if (c == -1) {
                 throw err("unterminated array");
             } else {
                 throw err("expected ',' or ']'");
             }
         }
+    }
+
+    /**
+     * Up to one tail (32 elements) the vector adopts an exact-size copy;
+     * beyond that the trie is built straight from the scratch buffer, as
+     * PersistentVector.create would from an intermediate copy.
+     */
+    private static Object buildVector(Object[] vals, int n) {
+        if (n <= 32) {
+            return LazilyPersistentVector.createOwning(Arrays.copyOf(vals, n));
+        }
+        ITransientCollection t = PersistentVector.EMPTY.asTransient();
+        for (int i = 0; i < n; i++) {
+            t = t.conj(vals[i]);
+        }
+        return t.persistent();
     }
 
     // ---------------------------------------------------------------- strings
@@ -526,13 +569,20 @@ public final class JsonParser {
                     throw err("unescaped control character in string");
                 } else {
                     long r = decodeUtf8(p, c);
-                    p = (int) (r >>> 32);
-                    int cp = (int) r;
-                    if (cp >= 0x10000) {
-                        out[n++] = (char) (0xD800 + ((cp - 0x10000) >>> 10));
-                        out[n++] = (char) (0xDC00 + ((cp - 0x10000) & 0x3FF));
+                    if (r >= 0) {
+                        p = (int) (r >>> 32);
+                        int cp = (int) r;
+                        if (cp >= 0x10000) {
+                            out[n++] = (char) (0xD800 + ((cp - 0x10000) >>> 10));
+                            out[n++] = (char) (0xDC00 + ((cp - 0x10000) & 0x3FF));
+                        } else {
+                            out[n++] = (char) cp;
+                        }
                     } else {
-                        out[n++] = (char) cp;
+                        r = decodeMalformedRun(p, n);
+                        p = (int) (r >>> 32);
+                        n = (int) r;
+                        out = cbuf;
                     }
                 }
                 if (p < end) {
@@ -546,41 +596,62 @@ public final class JsonParser {
     }
 
     /**
-     * Lenient UTF-8 decode of the sequence starting at p: malformed sequences
-     * become U+FFFD, matching the behavior of the no-escape fast path (String
-     * ctor). Returns new position in the high 32 bits, code point in the low.
-     * Kept out of parseStringSlow to preserve its inline budget.
+     * Strict decode of one well-formed UTF-8 sequence at p (no overlongs,
+     * no encoded surrogates, nothing above U+10FFFF): returns
+     * (newPos << 32) | codePoint, or -1 if malformed. Kept out of
+     * parseStringSlow to preserve its inline budget.
      */
     private long decodeUtf8(int p, int c) {
         byte[] b = buf;
-        int cp;
-        if ((c & 0xE0) == 0xC0 && p + 1 < end && cont(b[p + 1])) {
-            cp = ((c & 0x1F) << 6) | (b[p + 1] & 0x3F);
-            if (cp < 0x80) {
-                cp = 0xFFFD;
+        if (c >= 0xC2 && c <= 0xDF) {
+            if (p + 1 < end && cont(b[p + 1])) {
+                return ((long) (p + 2) << 32) | (((c & 0x1F) << 6) | (b[p + 1] & 0x3F));
             }
-            p += 2;
-        } else if ((c & 0xF0) == 0xE0 && p + 2 < end && cont(b[p + 1]) && cont(b[p + 2])) {
-            cp = ((c & 0x0F) << 12) | ((b[p + 1] & 0x3F) << 6) | (b[p + 2] & 0x3F);
-            if (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) {
-                cp = 0xFFFD;
+        } else if ((c & 0xF0) == 0xE0) {
+            if (p + 2 < end && cont(b[p + 1]) && cont(b[p + 2])) {
+                int cp = ((c & 0x0F) << 12) | ((b[p + 1] & 0x3F) << 6) | (b[p + 2] & 0x3F);
+                if (cp >= 0x800 && (cp < 0xD800 || cp > 0xDFFF)) {
+                    return ((long) (p + 3) << 32) | cp;
+                }
             }
-            p += 3;
-        } else if ((c & 0xF8) == 0xF0 && p + 3 < end && cont(b[p + 1]) && cont(b[p + 2]) && cont(b[p + 3])) {
-            cp = ((c & 0x07) << 18) | ((b[p + 1] & 0x3F) << 12) | ((b[p + 2] & 0x3F) << 6) | (b[p + 3] & 0x3F);
-            if (cp < 0x10000 || cp > 0x10FFFF) {
-                cp = 0xFFFD;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            if (p + 3 < end && cont(b[p + 1]) && cont(b[p + 2]) && cont(b[p + 3])) {
+                int cp = ((c & 0x07) << 18) | ((b[p + 1] & 0x3F) << 12)
+                        | ((b[p + 2] & 0x3F) << 6) | (b[p + 3] & 0x3F);
+                if (cp >= 0x10000 && cp <= 0x10FFFF) {
+                    return ((long) (p + 4) << 32) | cp;
+                }
             }
-            p += 4;
-        } else {
-            cp = 0xFFFD;
-            p++;
         }
-        return ((long) p << 32) | cp;
+        return -1;
     }
 
     private static boolean cont(byte b) {
         return (b & 0xC0) == 0x80;
+    }
+
+    /**
+     * Malformed UTF-8 (rare): the rest of the non-ASCII run at p goes
+     * through the same JDK decoder as the no-escape fast path, so U+FFFD
+     * replacement is identical either way. Valid input never gets here and
+     * all decoders agree on it; p sits on a sequence boundary, and ASCII
+     * bytes never continue a sequence, so decoding the run alone equals
+     * decoding it in place. Appends to cbuf at n; returns
+     * (newPos << 32) | newN.
+     */
+    private long decodeMalformedRun(int p, int n) {
+        byte[] b = buf;
+        int runEnd = p + 1;
+        while (runEnd < end && b[runEnd] < 0) {
+            runEnd++;
+        }
+        String decoded = new String(b, p, runEnd - p, StandardCharsets.UTF_8);
+        int k = decoded.length();
+        if (n + k + 2 > cbuf.length) {
+            cbuf = Arrays.copyOf(cbuf, Math.max(n + k + 2, cbuf.length << 1));
+        }
+        decoded.getChars(0, k, cbuf, n);
+        return ((long) runEnd << 32) | (n + k);
     }
 
     private static final byte[] HEX = new byte[256];
@@ -722,6 +793,10 @@ public final class JsonParser {
             } while (p < end && isDigit(b[p]));
             decExp += expNeg ? -expVal : expVal;
         }
+        if (p - start > maxNumberLength) {
+            pos = start;
+            throw err("number exceeds max length of " + maxNumberLength);
+        }
         pos = p;
         if (isInt) {
             if (intDigits <= 18) {
@@ -732,6 +807,9 @@ public final class JsonParser {
                 return bi.longValue();
             }
             return bi;
+        }
+        if (bigdec) {
+            return new BigDecimal(new String(b, start, p - start, StandardCharsets.ISO_8859_1));
         }
         return toDouble(neg, mant, decExp, truncated, start, p - start);
     }
@@ -907,7 +985,30 @@ public final class JsonParser {
         return a;
     }
 
+    private void skipByteOrderMark() {
+        if (end - pos >= 3 && buf[pos] == (byte) 0xEF && buf[pos + 1] == (byte) 0xBB
+                && buf[pos + 2] == (byte) 0xBF) {
+            pos += 3;
+        }
+    }
+
+    /**
+     * Line and column are derived from the offset only when an error is
+     * thrown, keeping newline tracking off the hot path. Columns count code
+     * points: UTF-8 continuation bytes are skipped.
+     */
     private JsonParseException err(String msg) {
-        return new JsonParseException(msg, pos);
+        int line = 1;
+        int column = 1;
+        for (int i = begin; i < pos; i++) {
+            byte c = buf[i];
+            if (c == '\n') {
+                line++;
+                column = 1;
+            } else if ((c & 0xC0) != 0x80) {
+                column++;
+            }
+        }
+        return new JsonParseException(msg, pos, line, column);
     }
 }

@@ -52,22 +52,39 @@ git checkout instead, compile it once with `clj -T:build javac`.
 |---|---|---|
 | `:key-fn` | `nil` | fn of `String -> key` applied to object keys; `nil` keeps strings. `clojure.core/keyword` is recognized and takes an optimized interning path. Must be pure: results are cached by fn identity |
 | `:max-depth` | `1000` | maximum nesting depth (stack-overflow/DoS guard) |
+| `:max-number-length` | `1000` | maximum length of a number token in chars; converting huge numbers to `BigInteger`/`BigDecimal` is superlinear (DoS guard) |
+| `:bigdec` | `false` | read non-integer numbers as exact `BigDecimal`s instead of doubles |
+
+A leading UTF-8 byte order mark is skipped. Invalid input throws
+`com.s_exp.oda.JsonParseException`; its `ex-data` is
+`{:offset <byte offset> :line <1-based> :column <1-based, in characters>}`.
 
 `write-str` / `write-bytes` / `write`:
 
 | option | default | |
 |---|---|---|
-| `:default-fn` | `nil` | called on values that cannot be written natively — unsupported types AND supported types with unrepresentable values (NaN/Infinity Float/Double). Must return a writable value; without it those cases throw |
-| `:key-fn` | `nil` | transforms each map key before dispatch. Use to handle `nil` keys, custom types, or normalize keys. Takes the key, returns any writable key (String, Keyword, Symbol, Number) |
+| `:default-fn` | `nil` | called on values that cannot be written natively — unsupported types AND supported types with unrepresentable values (NaN/Infinity Float/Double). Must return a natively writable value: it is not applied again to its own result (values nested inside it do get it). Without it those cases throw. NaN/Infinity map keys go through it too, its result being written as a key |
+| `:key-fn` | `nil` | transforms each map key before dispatch. Use to handle `nil` keys, custom types, or normalize keys. Takes the key, returns any writable key (String, Keyword, Symbol, Number, UUID, Boolean, Character) |
+| `:max-depth` | `1000` | maximum nesting depth; deeper (or cyclic) values throw instead of overflowing the stack |
 | `:date-format` | `yyyy-MM-dd'T'HH:mm:ss'Z'` (UTC) | format for `java.util.Date`/`java.time.Instant` values: a pattern string or a `DateTimeFormatter` (zone-less formatters default to UTC) |
 
 ### Supported types (write)
 
-Maps (keys: keyword, string, symbol, number), vectors, sets, seqs,
-`java.util.Map`/`Iterable`, strings, keywords, symbols, chars, UUIDs,
-`java.util.Date`/`java.time.Instant` (see `:date-format`), all JVM numbers
-(Ratio written as double), booleans, nil. NaN/Infinity throw unless
-`:default-fn` is provided.
+Maps (keys: keyword, string, symbol, number, UUID, boolean, char),
+vectors, sets, seqs, `java.util.Map`/`Iterable`, Java arrays (`byte[]` as a
+base64 string and `char[]` as a string, like Jackson), strings, keywords,
+symbols, chars, UUIDs, `java.util.Date`/`java.time.Instant` (see
+`:date-format`), other `java.time` values as ISO-8601 strings (zoned
+date-times with their offset), all JVM numbers (Ratio written as double),
+booleans, nil. NaN/Infinity throw unless `:default-fn` is provided.
+
+### Hostile input
+
+`parse` bounds nesting depth and number length, and its key caches retain
+at most 64 bytes per key. It does not bound document size or object key
+count: a large object whose keys share one `String.hashCode` degrades
+Clojure's `PersistentHashMap` (and Jackson-based libraries alike) to
+quadratic time, so cap request body sizes upstream.
 
 ## Performance
 

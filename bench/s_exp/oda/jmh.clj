@@ -1,3 +1,6 @@
+;; ABOUTME: JMH benchmark runner for oda and jsonista parse/write throughput.
+;; ABOUTME: Reports time and allocation per op across the payload matrix.
+
 (ns s-exp.oda.jmh
   "JMH benchmarks: forked JVMs, gc profiler (alloc rate per op), oda and
   jsonista measured under the same harness.

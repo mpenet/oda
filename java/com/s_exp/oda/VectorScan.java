@@ -1,3 +1,6 @@
+// ABOUTME: SIMD string scanning and ASCII encoding via the incubating Vector API.
+// ABOUTME: Only loaded when jdk.incubator.vector is available and enabled.
+
 package com.s_exp.oda;
 
 import jdk.incubator.vector.ByteVector;

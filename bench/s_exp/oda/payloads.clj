@@ -1,3 +1,6 @@
+;; ABOUTME: Benchmark payloads: synthetic and real-world JSON documents as bytes.
+;; ABOUTME: Shared by the criterium and JMH harnesses.
+
 (ns s-exp.oda.payloads
   "Benchmark payload matrix, shared by the criterium and JMH harnesses."
   (:require [clojure.string :as str]

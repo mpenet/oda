@@ -1,3 +1,6 @@
+// ABOUTME: Correctly rounded decimal-to-double conversion (Eisel-Lemire algorithm).
+// ABOUTME: Used by the parser; signals inexact cases so callers fall back to the JDK.
+
 package com.s_exp.oda;
 
 import java.math.BigInteger;

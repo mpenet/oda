@@ -1,3 +1,6 @@
+// ABOUTME: Shortest round-tripping double-to-decimal formatting (Ryu algorithm).
+// ABOUTME: Used by the writer; output matches Double.toString formatting.
+
 // Copyright 2018 Ulf Adams
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

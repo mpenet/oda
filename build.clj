@@ -1,3 +1,6 @@
+;; ABOUTME: tools.build tasks: compile the Java core, build, install and deploy the jar.
+;; ABOUTME: Also tags releases; version derives from the git commit count.
+
 (ns build
   (:require [clojure.tools.build.api :as b]
             [clojure.tools.build.tasks.process :as p]

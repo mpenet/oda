@@ -5,6 +5,7 @@ package com.s_exp.oda;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.lang.ref.WeakReference;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 
@@ -42,8 +43,31 @@ final class KeyCache {
      */
     static final int MAX_KEY_LENGTH = 64;
 
-    /** Size of the per-parse table used with a custom key-fn. */
+    /** Size of the table used with a custom key-fn. */
     static final int CUSTOM_SIZE = 512;
+
+    /** A custom key-fn's table; the weak ref never pins a dropped fn. */
+    private record FnTable(WeakReference<Object> fn, Entry[] table) {
+    }
+
+    /**
+     * Custom key-fn tables found by fn identity, same lossy lock-free design
+     * as the key tables: a def'd fn keeps its table across parses, a fresh
+     * lambda per call gets a fresh table, and a colliding fn evicts it at
+     * worst (cache goes cold, results stay correct). Requires pure fns.
+     */
+    private static final FnTable[] FN_TABLES = new FnTable[64];
+
+    static Entry[] tableFor(Object fn) {
+        int slot = System.identityHashCode(fn) & (FN_TABLES.length - 1);
+        FnTable t = FN_TABLES[slot];
+        if (t != null && t.fn().get() == fn) {
+            return t.table();
+        }
+        Entry[] table = new Entry[CUSTOM_SIZE];
+        FN_TABLES[slot] = new FnTable(new WeakReference<>(fn), table);
+        return table;
+    }
 
     private KeyCache() {
     }

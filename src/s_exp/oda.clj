@@ -56,11 +56,13 @@
     inside the result do get it). Without it, those cases throw.
   * `:key-fn`      - transforms each map key before dispatch. Use to handle
     nil keys, custom types, or normalize keys. Takes the key, returns any
-    writable key (String, Keyword, Symbol, Number, UUID, Boolean, Character).
+    writable key (String, Keyword, Symbol, Number, UUID, Boolean, Character,
+    Enum).
   * `:date-format` - format for java.util.Date and java.time.Instant values:
     a pattern string or a java.time.format.DateTimeFormatter (zone-less
     formatters default to UTC). Default: yyyy-MM-dd'T'HH:mm:ss'Z' at UTC.
-    Other java.time values are written as ISO-8601 strings.
+    Other java.time values are written as ISO-8601 strings, Java enums by
+    name.
   * `:max-depth`   - maximum nesting depth (default 1000); deeper or cyclic
     values throw instead of overflowing the stack."
   (^String [x]

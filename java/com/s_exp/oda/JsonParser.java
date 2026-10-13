@@ -21,10 +21,8 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.Map;
-import java.util.WeakHashMap;
 
 /**
  * Recursive-descent JSON parser building Clojure persistent data structures
@@ -83,15 +81,6 @@ public final class JsonParser {
         }
     }
 
-    /**
-     * Per-fn-instance key tables for custom key fns, keyed by identity.
-     * Requires key fns to be pure. Weak keys: tables of discarded lambdas
-     * get collected; a def'd fn keeps its table and gets cross-parse
-     * caching like the built-in modes.
-     */
-    private static final Map<IFn, KeyCache.Entry[]> CUSTOM_TABLES =
-            Collections.synchronizedMap(new WeakHashMap<>());
-
     private final byte[] buf;
     private final int begin;
     private final int end;
@@ -104,8 +93,11 @@ public final class JsonParser {
     private int pos;
 
     private char[] cbuf = new char[64];
-    private Object[][] kvBufs = new Object[16][];
-    private Object[][] valBufs = new Object[16][];
+    /**
+     * Per-depth element buffers. Shared by objects and arrays: only one
+     * container is open at any nesting depth.
+     */
+    private Object[][] scratch = new Object[16][];
 
     private JsonParser(byte[] buf, int offset, int length, IFn keyFn, int maxDepth,
                        int maxNumberLength, boolean bigdec) {
@@ -135,8 +127,7 @@ public final class JsonParser {
                     "key-fn must be a fn of String -> key, got keyword: " + keyFn);
         } else {
             this.keyMode = KEY_CUSTOM;
-            this.keyTable = CUSTOM_TABLES.computeIfAbsent(keyFn,
-                    f -> new KeyCache.Entry[KeyCache.CUSTOM_SIZE]);
+            this.keyTable = KeyCache.tableFor(keyFn);
             this.keyFn = keyFn;
         }
     }
@@ -197,7 +188,7 @@ public final class JsonParser {
             pos++;
             return PersistentArrayMap.EMPTY;
         }
-        Object[] kvs = kvBuf(depth);
+        Object[] kvs = scratch(depth);
         int n = 0;
         while (true) {
             if (c != '"') {
@@ -212,7 +203,7 @@ public final class JsonParser {
             Object v = parseValue(depth + 1, nextToken());
             if (n == kvs.length) {
                 kvs = Arrays.copyOf(kvs, n << 1);
-                kvBufs[depth] = kvs;
+                scratch[depth] = kvs;
             }
             kvs[n] = k;
             kvs[n + 1] = v;
@@ -232,7 +223,7 @@ public final class JsonParser {
         }
     }
 
-    private static Object buildMap(Object[] kvs, int n) {
+    private Object buildMap(Object[] kvs, int n) {
         if (n <= ARRAY_MAP_THRESHOLD) {
             // Last-wins duplicate handling. Fast path is a pointer compare:
             // interned keywords and KeyCache-hit strings share identity for
@@ -260,11 +251,84 @@ public final class JsonParser {
             }
             return new PersistentArrayMap(arr);
         }
+        if (n > GUARDED_KVS) {
+            return buildGuardedMap(kvs, n);
+        }
         ITransientMap t = (ITransientMap) PersistentHashMap.EMPTY.asTransient();
         for (int i = 0; i < n; i += 2) {
             t = t.assoc(kvs[i], kvs[i + 1]);
         }
         return t.persistent();
+    }
+
+    /**
+     * Objects above this many kvs (64 keys) get the collision guard; below
+     * it a PersistentHashMap's worst case stays bounded per object.
+     */
+    private static final int GUARDED_KVS = 128;
+
+    /** Most distinct keys allowed to share one hash in a guarded object. */
+    private static final int MAX_COLLIDING_KEYS = 16;
+
+    /**
+     * Per-JVM secret for the guard's slot mixing, so hash values chosen by
+     * an attacker cannot be steered into shared slots of the count table.
+     */
+    private static final int GUARD_SEED = new SecureRandom().nextInt();
+
+    private int[] guardHashes = new int[0];
+    private int[] guardCounts = new int[0];
+
+    /**
+     * Distinct keys sharing one hash land in a PersistentHashMap collision
+     * node, where each insert scans linearly: crafted keys make building
+     * a large object quadratic (Clojure maps have no tree bins like
+     * java.util.HashMap). Counts distinct keys per hash as the map grows
+     * (duplicates of a key don't grow it) and rejects the object once one
+     * hash is shared by more than MAX_COLLIDING_KEYS of them.
+     */
+    private Object buildGuardedMap(Object[] kvs, int n) {
+        int cap = Integer.highestOneBit(n - 1) << 1; // >= 2x the key count
+        if (guardCounts.length < cap) {
+            guardHashes = new int[cap];
+            guardCounts = new int[cap];
+        } else {
+            Arrays.fill(guardCounts, 0, cap, 0);
+        }
+        int[] hashes = guardHashes;
+        int[] counts = guardCounts;
+        int mask = cap - 1;
+        ITransientMap t = (ITransientMap) PersistentHashMap.EMPTY.asTransient();
+        int size = 0;
+        for (int i = 0; i < n; i += 2) {
+            Object k = kvs[i];
+            t = t.assoc(k, kvs[i + 1]);
+            if (t.count() == size) {
+                continue; // duplicate key replaced
+            }
+            size++;
+            int h = Util.hasheq(k);
+            int s = guardSlot(h) & mask;
+            while (counts[s] != 0 && hashes[s] != h) {
+                s = (s + 1) & mask;
+            }
+            hashes[s] = h;
+            if (++counts[s] > MAX_COLLIDING_KEYS) {
+                throw err("too many object keys with colliding hashes");
+            }
+        }
+        return t.persistent();
+    }
+
+    /** murmur3 fmix32 of the seeded hash: a bijection, so equal hashes share a slot. */
+    private static int guardSlot(int h) {
+        h ^= GUARD_SEED;
+        h ^= h >>> 16;
+        h *= 0x85ebca6b;
+        h ^= h >>> 13;
+        h *= 0xc2b2ae35;
+        h ^= h >>> 16;
+        return h;
     }
 
     private Object parseKey() {
@@ -375,13 +439,13 @@ public final class JsonParser {
             pos++;
             return PersistentVector.EMPTY;
         }
-        Object[] vals = valBuf(depth);
+        Object[] vals = scratch(depth);
         int n = 0;
         while (true) {
             Object v = parseValue(depth + 1, c);
             if (n == vals.length) {
                 vals = Arrays.copyOf(vals, n << 1);
-                valBufs[depth] = vals;
+                scratch[depth] = vals;
             }
             vals[n++] = v;
             c = nextToken();
@@ -809,7 +873,13 @@ public final class JsonParser {
             return bi;
         }
         if (bigdec) {
-            return new BigDecimal(new String(b, start, p - start, StandardCharsets.ISO_8859_1));
+            try {
+                return new BigDecimal(new String(b, start, p - start, StandardCharsets.ISO_8859_1));
+            } catch (NumberFormatException e) {
+                // the span is valid JSON; only the scale can exceed int range
+                pos = start;
+                throw err("number out of range for BigDecimal");
+            }
         }
         return toDouble(neg, mant, decExp, truncated, start, p - start);
     }
@@ -961,22 +1031,10 @@ public final class JsonParser {
         return ~ws & HIGH_BITS;
     }
 
-    private Object[] kvBuf(int depth) {
-        Object[][] bufs = kvBufs;
+    private Object[] scratch(int depth) {
+        Object[][] bufs = scratch;
         if (depth >= bufs.length) {
-            kvBufs = bufs = Arrays.copyOf(bufs, Math.max(depth + 1, bufs.length << 1));
-        }
-        Object[] a = bufs[depth];
-        if (a == null) {
-            bufs[depth] = a = new Object[16];
-        }
-        return a;
-    }
-
-    private Object[] valBuf(int depth) {
-        Object[][] bufs = valBufs;
-        if (depth >= bufs.length) {
-            valBufs = bufs = Arrays.copyOf(bufs, Math.max(depth + 1, bufs.length << 1));
+            scratch = bufs = Arrays.copyOf(bufs, Math.max(depth + 1, bufs.length << 1));
         }
         Object[] a = bufs[depth];
         if (a == null) {

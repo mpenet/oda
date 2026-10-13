@@ -64,27 +64,39 @@ A leading UTF-8 byte order mark is skipped. Invalid input throws
 | option | default | |
 |---|---|---|
 | `:default-fn` | `nil` | called on values that cannot be written natively — unsupported types AND supported types with unrepresentable values (NaN/Infinity Float/Double). Must return a natively writable value: it is not applied again to its own result (values nested inside it do get it). Without it those cases throw. NaN/Infinity map keys go through it too, its result being written as a key |
-| `:key-fn` | `nil` | transforms each map key before dispatch. Use to handle `nil` keys, custom types, or normalize keys. Takes the key, returns any writable key (String, Keyword, Symbol, Number, UUID, Boolean, Character) |
+| `:key-fn` | `nil` | transforms each map key before dispatch. Use to handle `nil` keys, custom types, or normalize keys. Takes the key, returns any writable key (String, Keyword, Symbol, Number, UUID, Boolean, Character, Enum) |
 | `:max-depth` | `1000` | maximum nesting depth; deeper (or cyclic) values throw instead of overflowing the stack |
 | `:date-format` | `yyyy-MM-dd'T'HH:mm:ss'Z'` (UTC) | format for `java.util.Date`/`java.time.Instant` values: a pattern string or a `DateTimeFormatter` (zone-less formatters default to UTC) |
 
 ### Supported types (write)
 
-Maps (keys: keyword, string, symbol, number, UUID, boolean, char),
+Maps (keys: keyword, string, symbol, number, UUID, boolean, char, enum),
 vectors, sets, seqs, `java.util.Map`/`Iterable`, Java arrays (`byte[]` as a
 base64 string and `char[]` as a string, like Jackson), strings, keywords,
-symbols, chars, UUIDs, `java.util.Date`/`java.time.Instant` (see
+symbols, chars, UUIDs, Java enums (by name), `java.util.Date`/`java.time.Instant` (see
 `:date-format`), other `java.time` values as ISO-8601 strings (zoned
 date-times with their offset), all JVM numbers (Ratio written as double),
 booleans, nil. NaN/Infinity throw unless `:default-fn` is provided.
 
 ### Hostile input
 
-`parse` bounds nesting depth and number length, and its key caches retain
-at most 64 bytes per key. It does not bound document size or object key
-count: a large object whose keys share one `String.hashCode` degrades
-Clojure's `PersistentHashMap` (and Jackson-based libraries alike) to
-quadratic time, so cap request body sizes upstream.
+`parse` is safe to expose to untrusted input; every guard fails with a
+`JsonParseException`:
+
+- nesting depth and number length are bounded (`:max-depth`,
+  `:max-number-length`); huge numbers would otherwise cost superlinear
+  `BigInteger`/`BigDecimal` conversions
+- objects with more than 64 keys reject crafted hash collisions (more than
+  16 distinct keys sharing one hash), which would otherwise make building
+  Clojure's `PersistentHashMap` quadratic: 50k colliding keys take ~10s
+  unguarded. Duplicate keys are not collisions
+- key caches retain at most 64 bytes per key, so hostile keys cannot pin
+  memory
+- malformed UTF-8 (including overlong forms such as `C0 AF` for `/`) is
+  replaced with U+FFFD, never decoded leniently
+
+Document size is the caller's to bound (e.g. request body limits): `parse`
+reads its whole input into memory.
 
 ## Performance
 

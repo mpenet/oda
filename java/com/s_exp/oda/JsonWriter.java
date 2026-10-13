@@ -288,6 +288,10 @@ public final class JsonWriter {
             writeInstantValue(i);
         } else if (x.getClass().isArray()) {
             return writeArray(x);
+        } else if (x instanceof Enum<?> e) {
+            // by name, like Jackson; before java.time: DayOfWeek and Month
+            // are enums implementing TemporalAccessor
+            writeJsonString(e.name());
         } else if (x instanceof TemporalAccessor || x instanceof TemporalAmount || x instanceof ZoneId) {
             return writeJavaTime(x);
         } else {
@@ -508,6 +512,8 @@ public final class JsonWriter {
             writeChar(c);
             ensure(1);
             buf[n++] = ':';
+        } else if (k instanceof Enum<?> e) {
+            writeStringKey(e.name());
         } else {
             throw new IllegalArgumentException(
                     "Cannot write map key of type " + (k == null ? "nil" : k.getClass().getName()));

@@ -5,6 +5,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [clojure.walk :as walk]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -74,6 +75,40 @@
       (is (thrown? JsonParseException (oda/parse (digits 1000000))))
       (is (< (/ (- (System/nanoTime) t0) 1e6) 500)))))
 
+(defn- colliding-strings
+  "n distinct strings sharing one String.hashCode (\"Aa\" and \"BB\" collide)."
+  [n]
+  (->> (iterate #(for [a % b ["Aa" "BB"]] (str a b)) ["Aa" "BB"])
+       (drop-while #(< (count %) n))
+       first
+       (take n)))
+
+(defn- object-json [ks]
+  (str "{" (str/join "," (map-indexed #(str "\"" %2 "\":" %1) ks)) "}"))
+
+(deftest hash-collision-guard
+  ;; keys sharing one hash degrade PersistentHashMap to quadratic time: a
+  ;; large object with many of them is rejected before the cost explodes
+  (is (thrown-with-msg? JsonParseException #"colliding"
+                        (oda/parse (object-json (colliding-strings 100)))))
+  (is (thrown? JsonParseException
+               ;; a common prefix preserves the collisions
+               (oda/parse (object-json (colliding-strings 100)) {:key-fn #(str "x" %)})))
+  (let [json (object-json (colliding-strings 50000))
+        t0 (System/nanoTime)]
+    (is (thrown? JsonParseException (oda/parse json)))
+    (is (< (/ (- (System/nanoTime) t0) 1e6) 200)))
+  ;; small objects are never checked: their worst case is bounded
+  (is (= 64 (count (oda/parse (object-json (colliding-strings 64))))))
+  ;; a few legitimate collisions in a large object are fine
+  (let [ks (concat (colliding-strings 16) (map #(str "k" %) (range 1000)))]
+    (is (= 1016 (count (oda/parse (object-json ks))))))
+  (is (= 10000 (count (oda/parse (object-json (map #(str "key" %) (range 10000)))))))
+  ;; duplicates of one key are not distinct colliding keys
+  (is (= {"a" 999} (oda/parse (object-json (repeat 1000 "a")))))
+  (is (= {:k 999} (oda/parse (object-json (map #(str "k" %) (range 1000)))
+                             {:key-fn (constantly :k)}))))
+
 (deftest byte-order-mark
   ;; a leading UTF-8 BOM (common in files from Windows tools) is skipped
   (is (= {} (oda/parse (byte-array [0xEF 0xBB 0xBF 0x7B 0x7D]))))
@@ -98,7 +133,11 @@
   (is (= {"a" [1.5M 2]} (oda/parse "{\"a\":[1.5,2]}" {:bigdec true})))
   (is (instance? Double (oda/parse "1.5" {:bigdec false})))
   (is (thrown? JsonParseException
-               (oda/parse (str "1." (apply str (repeat 1000 "1"))) {:bigdec true}))))
+               (oda/parse (str "1." (apply str (repeat 1000 "1"))) {:bigdec true})))
+  ;; exponents beyond BigDecimal's int scale are invalid input, not a crash
+  (is (thrown-with-msg? JsonParseException #"out of range"
+                        (oda/parse "0.4e99999999999" {:bigdec true})))
+  (is (thrown? JsonParseException (oda/parse "[1e-99999999999]" {:bigdec true}))))
 
 (defn- parse-error [s]
   (try (oda/parse s) nil (catch JsonParseException e e)))
@@ -665,6 +704,20 @@
          (oda/write-str (java.time.ZonedDateTime/of 2020 1 2 3 4 5 6000000
                                                     (java.time.ZoneId/of "Europe/Paris"))))))
 
+(deftest writer-enums
+  ;; by name(), like Jackson; java.time enums too (they are also temporals)
+  (doseq [v [java.util.concurrent.TimeUnit/SECONDS
+             java.time.DayOfWeek/MONDAY
+             java.time.Month/MARCH
+             java.math.RoundingMode/HALF_EVEN
+             [java.time.DayOfWeek/FRIDAY]
+             {:unit java.util.concurrent.TimeUnit/DAYS}]]
+    (is (= (j/write-value-as-string v) (oda/write-str v)) (pr-str v)))
+  (is (= "\"SECONDS\"" (oda/write-str java.util.concurrent.TimeUnit/SECONDS)))
+  (is (= "{\"MONDAY\":1}" (oda/write-str {java.time.DayOfWeek/MONDAY 1})))
+  (is (= (j/write-value-as-string {java.time.Month/MAY 1})
+         (oda/write-str {java.time.Month/MAY 1}))))
+
 (deftest writer-map-key-types
   (let [u (random-uuid)]
     (is (= (str "{\"" u "\":1}") (oda/write-str {u 1}))))
@@ -722,6 +775,149 @@
 (defspec write-differential-jsonista-reads-ours 300
   (prop/for-all [v gen-json]
                 (= v (j/read-value (oda/write-bytes v)))))
+
+;; --------------------------------------------------------------- concurrency
+
+(defn- run-concurrently
+  "Runs (f thread-index) on n threads released together; returns results."
+  [n f]
+  (let [start (java.util.concurrent.CountDownLatch. 1)
+        futs (mapv (fn [i] (future (.await start) (f i))) (range n))]
+    (.countDown start)
+    (mapv deref futs)))
+
+(defn- upper-keys [m]
+  (walk/postwalk #(if (map? %) (update-keys % str/upper-case) %) m))
+
+(def shared-upper-key-fn
+  "One shared custom key-fn: every thread hits the same identity-keyed table."
+  (fn [s] (str/upper-case s)))
+
+(deftest shared-caches-under-contention
+  ;; 20k distinct keys over 8192-slot lossy tables: slots are overwritten
+  ;; constantly while other threads read them. Racy reads must never
+  ;; return a wrong key or a torn entry.
+  (let [docs (vec (for [d (range 200)]
+                    (j/write-value-as-bytes
+                     (into {} (map (fn [k] [(str "key-" d "-" k "-" (mod (* d k) 97))
+                                            [k (str "v" k) (keyword (str "kv" (mod k 50)))]]))
+                           (range 100)))))
+        expected-str (mapv j/read-value docs)
+        expected-kw (mapv #(j/read-value % j/keyword-keys-object-mapper) docs)
+        expected-upper (mapv upper-keys expected-str)
+        values (mapv #(update-keys % keyword) expected-str)
+        expected-writes (mapv oda/write-str values)
+        results (run-concurrently
+                 16
+                 (fn [t]
+                   (every? true?
+                           (for [round (range 3)
+                                 i (range (count docs))
+                                 :let [i (mod (+ i (* t 13) round) (count docs))
+                                       bs (docs i)]]
+                             (and (= (expected-str i) (oda/parse bs))
+                                  (= (expected-kw i) (oda/parse bs {:key-fn keyword}))
+                                  (= (expected-upper i) (oda/parse bs {:key-fn shared-upper-key-fn}))
+                                  (= (expected-writes i) (oda/write-str (values i)))
+                                  (= (expected-writes i) (String. ^bytes (oda/write-bytes (values i)) "UTF-8")))))))]
+    (is (every? true? results))))
+
+(deftest custom-key-fn-tables-never-shared
+  ;; per-fn key tables are found by fn identity: closures of one fn class
+  ;; with different captured values must never see each other's results,
+  ;; also when created and dropped concurrently
+  (let [doc (.getBytes "{\"a\":1,\"b\":{\"c\":2}}" "UTF-8")
+        results (run-concurrently
+                 8
+                 (fn [t]
+                   (every? true?
+                           (for [i (range 2000)
+                                 :let [prefix (str t "-" i "-")
+                                       key-fn (fn [s] (str prefix s))]]
+                             (= {(str prefix "a") 1 (str prefix "b") {(str prefix "c") 2}}
+                                (oda/parse doc {:key-fn key-fn}))))))]
+    (is (every? true? results))))
+
+;; ------------------------------------------------------------------- fuzzing
+
+(def fuzz-seeds
+  "Suite documents plus synthetic ones reaching the special paths: long
+  strings (SIMD), keys around the 64-byte cache cap, escapes, raw and
+  malformed UTF-8, every number shape, deep nesting."
+  (let [long-key (apply str (repeat 70 "k"))
+        mid-key (apply str (repeat 40 "m"))
+        long-s (apply str (repeat 50 "abcdefgh"))]
+    (into (mapv #(Files/readAllBytes (.toPath ^java.io.File %)) (suite-files))
+          (map #(.getBytes ^String % "UTF-8"))
+          [(str "{\"" long-key "\":1,\"" mid-key "\":[1,2],\"a\":{\"" long-key "\":null}}")
+           (str "[\"" long-s "\",\"" long-s "\\n" long-s "é🎵\",\"\\ud834\\udd1e\"]")
+           "[0,-0,1.5e10,-2.5E-3,123456789012345678901234567890,1e400,0.1,9007199254740993]"
+           (str (apply str (repeat 40 "[{\"a\":")) "1" (apply str (repeat 40 "}]")))
+           "{\"a\":\"\\u0000\\u001f\\\"\\\\\\/\\b\\f\\n\\r\\t\",\"é\":true,\"\":false}"])))
+
+(def gen-mutated-doc
+  "A seed document with a few random byte flips, insertions, deletions,
+  or a truncation."
+  (gen/let [seed (gen/elements fuzz-seeds)
+            muts (gen/vector (gen/tuple (gen/elements [:flip :insert :delete :truncate])
+                                        gen/nat
+                                        (gen/choose 0 255))
+                             1 4)]
+    (byte-array
+     (reduce (fn [bs [op at b]]
+               (let [n (count bs)
+                     i (if (pos? n) (mod at n) 0)]
+                 (case op
+                   :flip (if (pos? n) (assoc bs i (unchecked-byte b)) bs)
+                   :insert (into (conj (subvec bs 0 i) (unchecked-byte b)) (subvec bs i))
+                   :delete (if (pos? n) (into (subvec bs 0 i) (subvec bs (inc i))) bs)
+                   :truncate (subvec bs 0 i))))
+             (vec seed)
+             muts))))
+
+(def fuzz-opts
+  [nil {:key-fn keyword} {:key-fn str/upper-case} {:bigdec true}])
+
+(defn- parses-or-rejects?
+  "True when parsing either succeeds or fails with JsonParseException; any
+  other throwable (index out of bounds, NPE, stack overflow...) is a bug."
+  [^bytes bs opts]
+  (try
+    (oda/parse bs opts)
+    true
+    (catch JsonParseException _ true)
+    (catch Throwable t
+      (println "unexpected" (class t) (ex-message t) "for" (pr-str (String. bs "UTF-8")) opts)
+      false)))
+
+(defspec fuzz-random-bytes 2000
+  (prop/for-all [bs gen/bytes
+                 opts (gen/elements fuzz-opts)]
+                (parses-or-rejects? bs opts)))
+
+(defspec fuzz-mutated-documents 5000
+  (prop/for-all [bs gen-mutated-doc
+                 opts (gen/elements fuzz-opts)]
+                (parses-or-rejects? bs opts)))
+
+(defn- valid-utf8? [^bytes bs]
+  (try
+    (.decode (.newDecoder java.nio.charset.StandardCharsets/UTF_8)
+             (java.nio.ByteBuffer/wrap bs))
+    true
+    (catch java.nio.charset.CharacterCodingException _ false)))
+
+(defspec fuzz-mutated-documents-differential 3000
+  ;; whenever both oda and jsonista accept a mutated, well-formed UTF-8
+  ;; document, they agree. Malformed UTF-8 is excluded: Jackson decodes
+  ;; overlong forms (C0 AF -> "/") and out-of-range sequences leniently,
+  ;; where oda replaces them with U+FFFD as Unicode requires.
+  (prop/for-all [bs gen-mutated-doc]
+                (let [ours (try {:ok (oda/parse bs)} (catch JsonParseException _ nil))
+                      theirs (try {:ok (j/read-value bs)} (catch Exception _ nil))]
+                  (or (nil? ours) (nil? theirs) (not (valid-utf8? bs)) (= ours theirs)
+                      (println "mismatch on" (mapv #(format "%02x" (bit-and % 0xff)) bs)
+                               "ours" (pr-str ours) "jsonista" (pr-str theirs))))))
 
 (deftest corpus-round-trip
   (doseq [^java.io.File f (suite-files)

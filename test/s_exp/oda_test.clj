@@ -495,9 +495,9 @@
         out (proxy [java.io.ByteArrayOutputStream] []
               (flush [] (swap! flushes inc)))]
     (oda/write {:a 1} out)
-    (oda/write {:a 2} out)
+    (oda/write {:a 1} out {:pretty true})
     (is (zero? @flushes))
-    (is (= "{\"a\":1}{\"a\":2}" (str out)))))
+    (is (= "{\"a\":1}{\n  \"a\" : 1\n}" (str out)))))
 
 (defn- pooled-writer-buffer-sizes []
   (let [buf-field (doto (.getDeclaredField com.s_exp.oda.JsonWriter "buf")
@@ -869,6 +869,52 @@
       (is (= "\"a\"" (oda/write-str (->Wrapped 1) {:encoders a})))
       (is (= "\"b\"" (oda/write-str (->Wrapped 1) {:encoders b})))
       (is (= "{\"v\":1}" (oda/write-str (->Wrapped 1)))))))
+
+;; ------------------------------------------------------------- pretty print
+
+(deftest writer-pretty-jackson-style
+  ;; Jackson's DefaultPrettyPrinter: objects one entry per line, 2-space
+  ;; indent, " : " separator; arrays inline; empty containers "{ }"/"[ ]"
+  (is (= "{\n  \"a\" : 1,\n  \"b\" : [ 1, 2 ],\n  \"c\" : { },\n  \"d\" : [ ],\n  \"e\" : [ {\n    \"f\" : 1\n  }, {\n    \"g\" : [ [ ] ]\n  } ]\n}"
+         (oda/write-str (array-map :a 1 :b [1 2] :c {} :d [] :e [{:f 1} {:g [[]]}])
+                        {:pretty true})))
+  (is (= "[ ]" (oda/write-str [] {:pretty true})))
+  (is (= "{ }" (oda/write-str {} {:pretty true})))
+  (is (= "1" (oda/write-str 1 {:pretty true})))
+  ;; structural chars and escapes inside strings are left alone
+  (is (= "{\n  \"{a:b,c}\" : \"[\\\"x\\\\\\\", :y]\"\n}"
+         (oda/write-str {"{a:b,c}" "[\"x\\\", :y]"} {:pretty true})))
+  (is (= "[ \"é🎵\", 1.5, null, true ]" (oda/write-str ["é🎵" 1.5 nil true] {:pretty true})))
+  (is (= "{\n  \"a\" : 1\n}" (String. (oda/write-bytes {:a 1} {:pretty true}) "UTF-8")))
+  (is (= "{\"a\":[1,2]}" (oda/write-str {:a [1 2]} {:pretty false}))))
+
+(def gen-json-ascii
+  "JSON values whose compact encoding is byte-identical between oda and
+  Jackson (no control chars: Jackson writes uppercase \\u00XX, no doubles)."
+  (gen/recursive-gen
+   (fn [inner]
+     (gen/one-of [(gen/vector inner)
+                  (gen/map gen/string-ascii inner)]))
+   (gen/one-of [gen/large-integer gen/string-ascii gen/boolean (gen/return nil)])))
+
+(def jsonista-pretty-mapper (j/object-mapper {:pretty true}))
+
+(defspec writer-pretty-differential-jackson 500
+  (prop/for-all [v gen-json-ascii]
+                (= (j/write-value-as-string v jsonista-pretty-mapper)
+                   (oda/write-str v {:pretty true}))))
+
+(defspec writer-pretty-streaming-equals-buffered 30
+  ;; streamed output is formatted chunk by chunk: strings, escapes and
+  ;; empty containers land across the 64KB buffer boundaries
+  (prop/for-all [v (gen/vector gen-json 0 40)
+                 pad (gen/choose 65400 65600)]
+                (let [v [(apply str (repeat pad "a")) v (apply str (repeat pad "\\\"{}"))
+                         (vec (repeat 20000 {})) v]
+                      out (java.io.ByteArrayOutputStream.)]
+                  (oda/write v out {:pretty true})
+                  (and (= (oda/write-str v {:pretty true}) (String. (.toByteArray out) "UTF-8"))
+                       (= v (oda/parse (.toByteArray out)))))))
 
 (def gen-json-kw
   (gen/recursive-gen

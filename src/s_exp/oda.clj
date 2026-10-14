@@ -105,20 +105,23 @@
     Other java.time values are written as ISO-8601 strings, Java enums by
     name.
   * `:max-depth`   - maximum nesting depth (default 1000); deeper or cyclic
-    values throw instead of overflowing the stack."
+    values throw instead of overflowing the stack.
+  * `:pretty`      - when true, indents output like Jackson's default pretty
+    printer (cheshire's and jsonista's `:pretty`): one object entry per
+    line, 2-space indent, `\"key\" : value`, arrays inline as `[ 1, 2 ]`."
   (^String [x]
-   (JsonWriter/writeString x nil nil nil default-max-depth nil))
-  (^String [x {:keys [default-fn key-fn date-format max-depth encoders]}]
+   (JsonWriter/writeString x nil nil nil default-max-depth nil false))
+  (^String [x {:keys [default-fn key-fn date-format max-depth encoders pretty]}]
    (JsonWriter/writeString x ^IFn default-fn ^IFn key-fn date-format
-                           (int (or max-depth default-max-depth)) encoders)))
+                           (int (or max-depth default-max-depth)) encoders (boolean pretty))))
 
 (defn write-bytes
   "Writes `x` as JSON UTF-8 encoded byte-array. See `write-str` for options."
   (^bytes [x]
-   (JsonWriter/writeBytes x nil nil nil default-max-depth nil))
-  (^bytes [x {:keys [default-fn key-fn date-format max-depth encoders]}]
+   (JsonWriter/writeBytes x nil nil nil default-max-depth nil false))
+  (^bytes [x {:keys [default-fn key-fn date-format max-depth encoders pretty]}]
    (JsonWriter/writeBytes x ^IFn default-fn ^IFn key-fn date-format
-                          (int (or max-depth default-max-depth)) encoders)))
+                          (int (or max-depth default-max-depth)) encoders (boolean pretty))))
 
 (defn write
   "Writes `x` as JSON to `out` (OutputStream). All bytes are handed to `out`
@@ -126,7 +129,7 @@
   buffered `out` is the caller's (so many values can share one stream
   without a flush each). See `write-str` for options."
   ([x ^OutputStream out]
-   (JsonWriter/writeStream x nil nil nil default-max-depth nil out))
-  ([x ^OutputStream out {:keys [default-fn key-fn date-format max-depth encoders]}]
+   (JsonWriter/writeStream x nil nil nil default-max-depth nil false out))
+  ([x ^OutputStream out {:keys [default-fn key-fn date-format max-depth encoders pretty]}]
    (JsonWriter/writeStream x ^IFn default-fn ^IFn key-fn date-format
-                           (int (or max-depth default-max-depth)) encoders out)))
+                           (int (or max-depth default-max-depth)) encoders (boolean pretty) out)))

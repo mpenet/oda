@@ -125,14 +125,20 @@ public final class JsonWriter {
     private int maxDepth;
     private int depth; // collections currently open
     private Encoders encoders;
+    private boolean pretty;
+    private PrettyPrinter printer; // kept with the pooled writer once used
 
     // ------------------------------------------------------------ public API
 
     public static String writeString(Object x, IFn defaultFn, IFn keyFn, Object dateFormat,
-                                     int maxDepth, Object encoders) {
-        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders);
+                                     int maxDepth, Object encoders, boolean pretty) {
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders, pretty);
         try {
             w.writeValue(x);
+            if (pretty) {
+                PrettyPrinter p = w.prettyPrint();
+                return new String(p.buf(), 0, p.length(), StandardCharsets.UTF_8);
+            }
             return new String(w.buf, 0, w.n, StandardCharsets.UTF_8);
         } finally {
             w.release();
@@ -140,14 +146,33 @@ public final class JsonWriter {
     }
 
     public static byte[] writeBytes(Object x, IFn defaultFn, IFn keyFn, Object dateFormat,
-                                    int maxDepth, Object encoders) {
-        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders);
+                                    int maxDepth, Object encoders, boolean pretty) {
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders, pretty);
         try {
             w.writeValue(x);
+            if (pretty) {
+                PrettyPrinter p = w.prettyPrint();
+                return Arrays.copyOf(p.buf(), p.length());
+            }
             return Arrays.copyOf(w.buf, w.n);
         } finally {
             w.release();
         }
+    }
+
+    /** Reformats the whole compact output, buffered. */
+    private PrettyPrinter prettyPrint() {
+        PrettyPrinter p = printer();
+        p.reset(null);
+        p.feed(buf, 0, n);
+        return p;
+    }
+
+    private PrettyPrinter printer() {
+        if (printer == null) {
+            printer = new PrettyPrinter();
+        }
+        return printer;
     }
 
     /**
@@ -159,16 +184,22 @@ public final class JsonWriter {
      */
     public static void writeStream(Object x, IFn defaultFn, IFn keyFn,
                                    Object dateFormat, int maxDepth, Object encoders,
-                                   OutputStream out)
+                                   boolean pretty, OutputStream out)
             throws IOException {
-        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders);
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders, pretty);
         try {
             if (w.buf.length < (1 << 16)) {
                 w.buf = new byte[1 << 16];
             }
             w.out = out;
+            if (pretty) {
+                w.printer().reset(out);
+            }
             w.writeValue(x);
             w.flushBuf();
+            if (pretty) {
+                w.printer.flush();
+            }
         } catch (UncheckedIOException e) {
             throw e.getCause();
         } finally {
@@ -179,17 +210,21 @@ public final class JsonWriter {
 
     private void flushBuf() {
         if (n > 0) {
-            try {
-                out.write(buf, 0, n);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+            if (pretty) {
+                printer.feed(buf, 0, n);
+            } else {
+                try {
+                    out.write(buf, 0, n);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
             }
             n = 0;
         }
     }
 
     private static JsonWriter acquire(IFn defaultFn, IFn keyFn, Object dateFormat,
-                                      int maxDepth, Object encoders) {
+                                      int maxDepth, Object encoders, boolean pretty) {
         JsonWriter w = POOL.poll();
         if (w == null) {
             w = new JsonWriter();
@@ -201,6 +236,7 @@ public final class JsonWriter {
         w.dateFormat = dateFormatter(dateFormat);
         w.maxDepth = maxDepth;
         w.encoders = encoders == null ? null : Encoders.of(encoders);
+        w.pretty = pretty;
         w.depth = 0;
         w.n = 0;
         return w;
@@ -211,6 +247,9 @@ public final class JsonWriter {
         keyFn = null;
         dateFormat = null;
         encoders = null;
+        if (printer != null) {
+            printer.release();
+        }
         // don't pin giant scratch buffers in the pool
         if (buf.length > (1 << 23)) {
             buf = new byte[1 << 16];

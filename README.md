@@ -96,6 +96,7 @@ A leading UTF-8 byte order mark is skipped. Invalid input throws
 | `:max-depth` | `1000` | maximum nesting depth; deeper (or cyclic) values throw instead of overflowing the stack |
 | `:date-format` | `yyyy-MM-dd'T'HH:mm:ss'Z'` (UTC) | format for `java.util.Date`/`java.time.Instant` values: a pattern string or a `DateTimeFormatter` (zone-less formatters default to UTC) |
 | `:encoders` | `nil` | map of `Class -> (fn [value] value-to-write)`, taking precedence over built-in encodings (see [Custom encoders](#custom-encoders)) |
+| `:pretty` | `false` | indent like Jackson's default pretty printer, as cheshire's and jsonista's `:pretty` do |
 
 ### Supported types (write)
 
@@ -138,6 +139,26 @@ included (records, which are maps; `byte[]`; `java.time` values...):
 - each class is resolved once per encoders map and cached by map identity:
   `def` the map rather than building it per call. Without `:encoders` the
   writer pays nothing
+
+### Pretty printing
+
+`{:pretty true}` reproduces the layout of Jackson's `DefaultPrettyPrinter`,
+byte for byte (with `\n` line ends), so output stays identical when moving
+from cheshire or jsonista:
+
+```clojure
+(println (oda/write-str {:a 1 :b [1 2] :c [{:d {}}]} {:pretty true}))
+;; {
+;;   "a" : 1,
+;;   "b" : [ 1, 2 ],
+;;   "c" : [ {
+;;     "d" : { }
+;;   } ]
+;; }
+```
+
+It is a separate pass over the compact output (streamed chunk by chunk by
+`write`), so compact writes pay nothing for it.
 
 ### Hostile input
 

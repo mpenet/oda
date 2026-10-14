@@ -487,6 +487,18 @@
     (oda/write [s] out)
     (is (= [s] (oda/parse (.toByteArray out))))))
 
+(deftest writer-stream-does-not-flush
+  ;; all bytes reach `out` before write returns; flushing its own buffering
+  ;; is the caller's call (per-value flushes cost a packet each through
+  ;; gzip or a socket)
+  (let [flushes (atom 0)
+        out (proxy [java.io.ByteArrayOutputStream] []
+              (flush [] (swap! flushes inc)))]
+    (oda/write {:a 1} out)
+    (oda/write {:a 2} out)
+    (is (zero? @flushes))
+    (is (= "{\"a\":1}{\"a\":2}" (str out)))))
+
 (defn- pooled-writer-buffer-sizes []
   (let [buf-field (doto (.getDeclaredField com.s_exp.oda.JsonWriter "buf")
                     (.setAccessible true))]

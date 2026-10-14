@@ -41,7 +41,8 @@ git checkout instead, compile it once with `clj -T:build javac`.
 ;; => "{\"a\":1,\"b\":[1.5,true,null]}"
 
 (oda/write-bytes {:a 1})            ;; => byte[]
-(oda/write {:a 1} output-stream)    ;; progressive, bounded memory
+(oda/write {:a 1} output-stream)    ;; progressive, bounded memory; does not
+                                    ;; flush nor close the stream
 ```
 
 ### Incremental reads

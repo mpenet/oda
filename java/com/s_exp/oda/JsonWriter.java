@@ -153,6 +153,8 @@ public final class JsonWriter {
      * Writes progressively: the internal buffer is flushed to {@code out}
      * whenever it fills, so memory stays bounded by the buffer size
      * regardless of document size (long strings are encoded in chunks).
+     * Every byte is handed to {@code out} before returning, but out itself
+     * is not flushed: many values can share a buffered stream.
      */
     public static void writeStream(Object x, IFn defaultFn, IFn keyFn,
                                    Object dateFormat, int maxDepth, OutputStream out)
@@ -165,7 +167,6 @@ public final class JsonWriter {
             w.out = out;
             w.writeValue(x);
             w.flushBuf();
-            out.flush();
         } catch (UncheckedIOException e) {
             throw e.getCause();
         } finally {

@@ -113,8 +113,10 @@
                           (int (or max-depth default-max-depth)))))
 
 (defn write
-  "Writes `x` as JSON to `out` (OutputStream), flushes, does not close.
-  See `write-str` for options."
+  "Writes `x` as JSON to `out` (OutputStream). All bytes are handed to `out`
+  before returning, but `out` is neither flushed nor closed: flushing a
+  buffered `out` is the caller's (so many values can share one stream
+  without a flush each). See `write-str` for options."
   ([x ^OutputStream out]
    (JsonWriter/writeStream x nil nil nil default-max-depth out))
   ([x ^OutputStream out {:keys [default-fn key-fn date-format max-depth]}]

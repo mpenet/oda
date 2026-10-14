@@ -34,6 +34,14 @@
 (defn oda-write-str-values [v] (oda/write-bytes v))
 (defn oda-write-kw-values [v] (oda/write-bytes v))
 
+(defrecord Unused [])
+
+(def encoders
+  "Matches none of the payloads' values: measures the per-value lookup."
+  {Unused (constantly nil)})
+
+(defn oda-write-kw-encoders [v] (oda/write-bytes v {:encoders encoders}))
+
 (defn jsonista-read-str [bs] (j/read-value bs))
 (defn jsonista-read-kw [bs] (j/read-value bs j/keyword-keys-object-mapper))
 (defn jsonista-write-str-values [v] (j/write-value-as-bytes v))
@@ -45,6 +53,7 @@
     {:name :oda-read-kw, :fn `oda-read-kw, :args [:state/bytes]}
     {:name :oda-write-str, :fn `oda-write-str-values, :args [:state/value-str]}
     {:name :oda-write-kw, :fn `oda-write-kw-values, :args [:state/value-kw]}
+    {:name :oda-write-kw-encoders, :fn `oda-write-kw-encoders, :args [:state/value-kw]}
     {:name :jsonista-read-str, :fn `jsonista-read-str, :args [:state/bytes]}
     {:name :jsonista-read-kw, :fn `jsonista-read-kw, :args [:state/bytes]}
     {:name :jsonista-write-str, :fn `jsonista-write-str-values, :args [:state/value-str]}

@@ -95,6 +95,7 @@ A leading UTF-8 byte order mark is skipped. Invalid input throws
 | `:key-fn` | `nil` | transforms each map key before dispatch. Use to handle `nil` keys, custom types, or normalize keys. Takes the key, returns any writable key (String, Keyword, Symbol, Number, UUID, Boolean, Character, Enum) |
 | `:max-depth` | `1000` | maximum nesting depth; deeper (or cyclic) values throw instead of overflowing the stack |
 | `:date-format` | `yyyy-MM-dd'T'HH:mm:ss'Z'` (UTC) | format for `java.util.Date`/`java.time.Instant` values: a pattern string or a `DateTimeFormatter` (zone-less formatters default to UTC) |
+| `:encoders` | `nil` | map of `Class -> (fn [value] value-to-write)`, taking precedence over built-in encodings (see [Custom encoders](#custom-encoders)) |
 
 ### Supported types (write)
 
@@ -104,7 +105,39 @@ base64 string and `char[]` as a string, like Jackson), strings, keywords,
 symbols, chars, UUIDs, Java enums (by name), `java.util.Date`/`java.time.Instant` (see
 `:date-format`), other `java.time` values as ISO-8601 strings (zoned
 date-times with their offset), all JVM numbers (Ratio written as double),
-booleans, nil. NaN/Infinity throw unless `:default-fn` is provided.
+booleans, nil. NaN/Infinity throw unless `:default-fn` is provided. Any
+type's encoding can be overridden with `:encoders`.
+
+### Custom encoders
+
+`:encoders` overrides how values of a type are written, built-in types
+included (records, which are maps; `byte[]`; `java.time` values...):
+
+```clojure
+(defrecord Money [amount currency])
+
+(def encoders
+  {Money (fn [m] (str (:amount m) " " (:currency m)))
+   java.time.temporal.Temporal str})
+
+(oda/write-str {:price (->Money 10 "EUR") :at (java.time.LocalDate/of 2026 1 2)}
+               {:encoders encoders})
+;; => "{\"price\":\"10 EUR\",\"at\":\"2026-01-02\"}"
+```
+
+- a value uses the encoder of its class, else of its nearest superclass,
+  else of its most specific interface, else of `Object`: like protocol
+  dispatch. For a fallback that only covers otherwise unwritable values,
+  use `:default-fn` instead of an `Object` encoder
+- the encoder's result is written without encoders (so an encoder may
+  return a value of its own type), values nested inside it do go
+  through them, and a result that can't be written natively goes to
+  `:default-fn`
+- map keys (see `:key-fn`) and primitive array elements don't go through
+  encoders
+- each class is resolved once per encoders map and cached by map identity:
+  `def` the map rather than building it per call. Without `:encoders` the
+  writer pays nothing
 
 ### Hostile input
 

@@ -769,6 +769,107 @@
   ;; lone surrogates cannot be encoded as UTF-8; we emit U+FFFD
   (is (= "\"�\"" (oda/write-str (String. (char-array [(char 0xD800)]))))))
 
+;; ------------------------------------------------------------------ encoders
+
+(defrecord Localized [format-string args])
+
+(defrecord Wrapped [v])
+
+(deftest writer-encoders-override-built-in-types
+  ;; records are maps, byte[] has a built-in base64 encoding: encoders win
+  (let [encoders {Localized (fn [l] (apply format (:format-string l) (:args l)))
+                  (Class/forName "[B") (fn [^bytes b] (str "0x" (count b)))}]
+    (is (= "\"a 1\"" (oda/write-str (->Localized "a %s" [1]) {:encoders encoders})))
+    (is (= "{\"m\":[\"a 1\",\"0x2\"]}"
+           (oda/write-str {:m [(->Localized "a %s" [1]) (byte-array 2)]} {:encoders encoders})))
+    (is (= "\"0x3\"" (String. (oda/write-bytes (byte-array 3) {:encoders encoders}) "UTF-8")))
+    (let [out (java.io.ByteArrayOutputStream.)]
+      (oda/write (object-array [(byte-array 1)]) out {:encoders encoders})
+      (is (= "[\"0x1\"]" (String. (.toByteArray out) "UTF-8")))))
+  ;; without encoders, records stay maps
+  (is (= "{\"format-string\":\"a\",\"args\":[]}" (oda/write-str (->Localized "a" [])))))
+
+(deftest writer-encoders-match-supertypes
+  ;; an interface encoder covers every implementing class, including the
+  ;; java.time types written natively otherwise
+  (let [encoders {java.time.temporal.Temporal (fn [_] "T")}]
+    (is (= "[\"T\",\"T\",\"T\"]"
+           (oda/write-str [(java.time.LocalDate/of 2020 1 2) (java.time.Instant/EPOCH)
+                           (java.time.OffsetDateTime/now)]
+                          {:encoders encoders})))
+    (is (= "\"1970-01-01T00:00:00Z\"" (oda/write-str (java.util.Date. 0) {:encoders encoders}))))
+  ;; most specific wins: exact class, then superclass chain, then the most
+  ;; specific interface, then Object
+  (let [encoders {Number (fn [_] "number")
+                  Long (fn [_] "long")
+                  Comparable (fn [_] "comparable")}]
+    ;; Object[] matches none of these, its elements do
+    (is (= "[\"long\",\"number\",\"comparable\"]"
+           (oda/write-str (object-array [1 (int 1) "s"]) {:encoders encoders}))))
+  ;; Object comes last, and matches every value, containers included
+  (let [encoders {Object (fn [_] "object") Comparable (fn [_] "comparable")}]
+    (is (= "\"comparable\"" (oda/write-str "s" {:encoders encoders})))
+    (is (= "\"object\"" (oda/write-str (Object.) {:encoders encoders})))
+    (is (= "\"object\"" (oda/write-str {:a 1} {:encoders encoders}))))
+  (let [encoders {java.util.Collection (fn [_] "collection")
+                  java.util.List (fn [_] "list")}]
+    (is (= "\"list\"" (oda/write-str [1] {:encoders encoders})))
+    (is (= "\"collection\"" (oda/write-str #{1} {:encoders encoders})))))
+
+(deftest writer-encoder-results
+  ;; the result is written natively: it does not go through encoders again,
+  ;; values nested inside it do
+  (is (= "\"a!\"" (oda/write-str "a" {:encoders {String #(str % "!")}})))
+  (is (= "{\"v\":{\"v\":1}}"
+         (oda/write-str (->Wrapped (->Wrapped 1)) {:encoders {Wrapped (fn [w] {:v (:v w)})}})))
+  (is (= "null" (oda/write-str (->Wrapped 1) {:encoders {Wrapped (constantly nil)}})))
+  ;; a result that cannot be written natively goes to default-fn
+  (is (= "\"x\"" (oda/write-str (->Wrapped 1) {:encoders {Wrapped (fn [_] (Object.))}
+                                               :default-fn (constantly "x")})))
+  (is (thrown? IllegalArgumentException
+               (oda/write-str (->Wrapped 1) {:encoders {Wrapped (fn [_] (Object.))}}))))
+
+(deftest writer-encoders-on-common-types
+  ;; the common value types are matched like any other, through their
+  ;; superclasses and interfaces too
+  (is (= "[\"cs\",\"n\",\"n\",\"named\",\"cmp\"]"
+         (oda/write-str (object-array ["s" 1 1.5 :k true])
+                        {:encoders {CharSequence (fn [_] "cs")
+                                    Number (fn [_] "n")
+                                    clojure.lang.Named (fn [_] "named")
+                                    Boolean (fn [_] "cmp")}})))
+  (is (= "[\"s\",\"1\"]" (oda/write-str (object-array ["s" 1]) {:encoders {Comparable str}})))
+  (is (= "[\"s\",1,\"x\"]" (oda/write-str ["s" 1 (->Wrapped 1)] {:encoders {Wrapped (fn [_] "x")}})))
+  ;; and the common collections
+  (let [encoders {clojure.lang.IPersistentMap (fn [_] "m") java.util.RandomAccess (fn [_] "v")}]
+    (is (= "\"v\"" (oda/write-str [{:a 1}] {:encoders encoders})))
+    (is (= "[\"m\",\"m\"]"
+           (oda/write-str (object-array [{:a 1} (into {} (map vector (range 20) (range 20)))])
+                          {:encoders encoders})))))
+
+(deftest writer-encoders-skip-map-keys
+  ;; keys go through key-fn only
+  (is (= "{\"1\":\"long\"}" (oda/write-str {1 2} {:encoders {Long (fn [_] "long")}})))
+  (is (= "{\"a\":\"string\"}" (oda/write-str {"a" "b"} {:encoders {String (fn [_] "string")}}))))
+
+(deftest writer-encoders-primitive-array-elements-are-written-directly
+  (is (= "[1.5]" (oda/write-str (float-array [1.5]) {:encoders {Float (fn [_] "float")}})))
+  (is (= "[1]" (oda/write-str (long-array [1]) {:encoders {Long (fn [_] "long")}}))))
+
+(deftest writer-encoders-validation
+  (is (thrown? IllegalArgumentException (oda/write-str 1 {:encoders {"Long" str}})))
+  (is (thrown? IllegalArgumentException (oda/write-str 1 {:encoders {Long "str"}}))))
+
+(deftest writer-encoders-resolved-per-map
+  ;; resolutions are cached per encoders map: a different map never sees
+  ;; another map's resolutions
+  (let [a {Wrapped (fn [_] "a")}
+        b {Wrapped (fn [_] "b")}]
+    (dotimes [_ 3]
+      (is (= "\"a\"" (oda/write-str (->Wrapped 1) {:encoders a})))
+      (is (= "\"b\"" (oda/write-str (->Wrapped 1) {:encoders b})))
+      (is (= "{\"v\":1}" (oda/write-str (->Wrapped 1)))))))
+
 (def gen-json-kw
   (gen/recursive-gen
    (fn [inner]
@@ -797,6 +898,19 @@
         futs (mapv (fn [i] (future (.await start) (f i))) (range n))]
     (.countDown start)
     (mapv deref futs)))
+
+(deftest writer-encoders-under-contention
+  ;; many classes resolved concurrently into one shared map's cache
+  (let [classes [Long Integer Short Byte Double Float String clojure.lang.Keyword
+                 clojure.lang.Symbol java.util.UUID Boolean Character]
+        encoders (into {} (map (fn [c] [c (fn [_] (.getSimpleName ^Class c))])) classes)
+        values (object-array [1 (int 1) (short 1) (byte 1) 1.5 (float 1.5) "s" :k 's
+                              (random-uuid) true \c])
+        expected (oda/write-str (mapv #(.getSimpleName (class %)) values))]
+    (is (every? #(= #{expected} %)
+                (run-concurrently 16 (fn [_]
+                                       (into #{} (repeatedly 200 #(oda/write-str values {:encoders encoders}))))))
+        "every thread sees the same, correct, result")))
 
 (defn- upper-keys [m]
   (walk/postwalk #(if (map? %) (update-keys % str/upper-case) %) m))

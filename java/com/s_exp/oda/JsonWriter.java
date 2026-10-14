@@ -124,12 +124,13 @@ public final class JsonWriter {
     private OutputStream out; // non-null = streaming mode: flush on overflow
     private int maxDepth;
     private int depth; // collections currently open
+    private Encoders encoders;
 
     // ------------------------------------------------------------ public API
 
     public static String writeString(Object x, IFn defaultFn, IFn keyFn, Object dateFormat,
-                                     int maxDepth) {
-        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth);
+                                     int maxDepth, Object encoders) {
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders);
         try {
             w.writeValue(x);
             return new String(w.buf, 0, w.n, StandardCharsets.UTF_8);
@@ -139,8 +140,8 @@ public final class JsonWriter {
     }
 
     public static byte[] writeBytes(Object x, IFn defaultFn, IFn keyFn, Object dateFormat,
-                                    int maxDepth) {
-        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth);
+                                    int maxDepth, Object encoders) {
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders);
         try {
             w.writeValue(x);
             return Arrays.copyOf(w.buf, w.n);
@@ -157,9 +158,10 @@ public final class JsonWriter {
      * is not flushed: many values can share a buffered stream.
      */
     public static void writeStream(Object x, IFn defaultFn, IFn keyFn,
-                                   Object dateFormat, int maxDepth, OutputStream out)
+                                   Object dateFormat, int maxDepth, Object encoders,
+                                   OutputStream out)
             throws IOException {
-        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth);
+        JsonWriter w = acquire(defaultFn, keyFn, dateFormat, maxDepth, encoders);
         try {
             if (w.buf.length < (1 << 16)) {
                 w.buf = new byte[1 << 16];
@@ -187,7 +189,7 @@ public final class JsonWriter {
     }
 
     private static JsonWriter acquire(IFn defaultFn, IFn keyFn, Object dateFormat,
-                                      int maxDepth) {
+                                      int maxDepth, Object encoders) {
         JsonWriter w = POOL.poll();
         if (w == null) {
             w = new JsonWriter();
@@ -198,6 +200,7 @@ public final class JsonWriter {
         w.keyFn = keyFn;
         w.dateFormat = dateFormatter(dateFormat);
         w.maxDepth = maxDepth;
+        w.encoders = encoders == null ? null : Encoders.of(encoders);
         w.depth = 0;
         w.n = 0;
         return w;
@@ -207,6 +210,7 @@ public final class JsonWriter {
         defaultFn = null;
         keyFn = null;
         dateFormat = null;
+        encoders = null;
         // don't pin giant scratch buffers in the pool
         if (buf.length > (1 << 23)) {
             buf = new byte[1 << 16];
@@ -227,9 +231,31 @@ public final class JsonWriter {
      * APersistentMap implements Iterable.
      */
     private void writeValue(Object x) {
+        if (encoders != null) {
+            x = encode(x);
+        }
         if (!writeNative(x)) {
             writeFallback(x);
         }
+    }
+
+    /**
+     * Out of line so writeValue stays within the JIT's small-method inline
+     * size: without encoders it only adds a null check.
+     */
+    private Object encode(Object x) {
+        if (x != null) {
+            Class<?> c = x.getClass();
+            if (encoders.commonTypesUnencoded && Encoders.isCommonType(c)) {
+                return x;
+            }
+            IFn enc = encoders.find(c);
+            if (enc != null) {
+                // the result is written as is: re-encoding it could loop
+                return enc.invoke(x);
+            }
+        }
+        return x;
     }
 
     /**
@@ -499,7 +525,9 @@ public final class JsonWriter {
         } else if (k instanceof Number) {
             ensure(1);
             buf[n++] = '"';
-            writeValue(k);
+            if (!writeNative(k)) { // no encoders on keys
+                writeFallback(k);
+            }
             ensure(2);
             buf[n++] = '"';
             buf[n++] = ':';
@@ -615,7 +643,10 @@ public final class JsonWriter {
             beginArray();
             for (int i = 0; i < arr.length; i++) {
                 comma(i);
-                writeValue(arr[i]);
+                Float f = arr[i];
+                if (!writeNative(f)) {
+                    writeFallback(f);
+                }
             }
         } else if (a instanceof boolean[] arr) {
             beginArray();

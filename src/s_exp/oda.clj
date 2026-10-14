@@ -82,6 +82,14 @@
   "Writes `x` as a JSON String.
 
   Options:
+  * `:encoders`    - map of Class -> fn of value -> value to write, taking
+    precedence over built-in encodings (records, byte arrays, java.time...).
+    A value uses the encoder of its class, else of its nearest superclass,
+    else of its most specific interface, else of Object, like protocol
+    dispatch. The result is written without encoders (values nested inside
+    it do get them), and through `:default-fn` if not natively writable.
+    Map keys and primitive array elements don't go through encoders.
+    Resolutions are cached per map: reuse the same map across calls
   * `:default-fn`  - called on values that cannot be written natively — both
     unsupported types AND supported types with unrepresentable values
     (NaN/Infinity Float/Double, also as map keys). Must return a natively
@@ -99,18 +107,18 @@
   * `:max-depth`   - maximum nesting depth (default 1000); deeper or cyclic
     values throw instead of overflowing the stack."
   (^String [x]
-   (JsonWriter/writeString x nil nil nil default-max-depth))
-  (^String [x {:keys [default-fn key-fn date-format max-depth]}]
+   (JsonWriter/writeString x nil nil nil default-max-depth nil))
+  (^String [x {:keys [default-fn key-fn date-format max-depth encoders]}]
    (JsonWriter/writeString x ^IFn default-fn ^IFn key-fn date-format
-                           (int (or max-depth default-max-depth)))))
+                           (int (or max-depth default-max-depth)) encoders)))
 
 (defn write-bytes
   "Writes `x` as JSON UTF-8 encoded byte-array. See `write-str` for options."
   (^bytes [x]
-   (JsonWriter/writeBytes x nil nil nil default-max-depth))
-  (^bytes [x {:keys [default-fn key-fn date-format max-depth]}]
+   (JsonWriter/writeBytes x nil nil nil default-max-depth nil))
+  (^bytes [x {:keys [default-fn key-fn date-format max-depth encoders]}]
    (JsonWriter/writeBytes x ^IFn default-fn ^IFn key-fn date-format
-                          (int (or max-depth default-max-depth)))))
+                          (int (or max-depth default-max-depth)) encoders)))
 
 (defn write
   "Writes `x` as JSON to `out` (OutputStream). All bytes are handed to `out`
@@ -118,7 +126,7 @@
   buffered `out` is the caller's (so many values can share one stream
   without a flush each). See `write-str` for options."
   ([x ^OutputStream out]
-   (JsonWriter/writeStream x nil nil nil default-max-depth out))
-  ([x ^OutputStream out {:keys [default-fn key-fn date-format max-depth]}]
+   (JsonWriter/writeStream x nil nil nil default-max-depth nil out))
+  ([x ^OutputStream out {:keys [default-fn key-fn date-format max-depth encoders]}]
    (JsonWriter/writeStream x ^IFn default-fn ^IFn key-fn date-format
-                           (int (or max-depth default-max-depth)) out)))
+                           (int (or max-depth default-max-depth)) encoders out)))

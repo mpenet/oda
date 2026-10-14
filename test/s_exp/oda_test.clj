@@ -919,6 +919,225 @@
                       (println "mismatch on" (mapv #(format "%02x" (bit-and % 0xff)) bs)
                                "ours" (pr-str ours) "jsonista" (pr-str theirs))))))
 
+;; ---------------------------------------------------------- incremental reads
+
+(defn- trickle-stream
+  "InputStream handing out at most `chunk` bytes per read, like a socket."
+  ^java.io.InputStream [^bytes bs chunk]
+  (let [pos (volatile! 0)]
+    (proxy [java.io.InputStream] []
+      (read
+        ([] (let [p (int @pos)]
+              (if (< p (alength bs))
+                (do (vswap! pos inc) (bit-and (aget bs p) 0xff))
+                -1)))
+        ([^bytes b off len]
+         (let [p (int @pos)
+               n (min (int len) (int chunk) (- (alength bs) p))]
+           (cond
+             (zero? (int len)) 0
+             (<= n 0) -1
+             :else (do (System/arraycopy bs p b (int off) n)
+                       (vswap! pos + n)
+                       n))))))))
+
+(defn- trickle-reader
+  "Reader handing out at most `chunk` chars per read."
+  ^java.io.Reader [^String s chunk]
+  (let [pos (volatile! 0)]
+    (proxy [java.io.Reader] []
+      ;; proxy replaces every arity of read: route them all to the chunked one
+      (read
+        ([] (let [a (char-array 1)]
+              (if (pos? (.read ^java.io.Reader this a 0 1)) (int (aget a 0)) -1)))
+        ([^java.nio.CharBuffer cb]
+         (let [a (char-array (max 1 (.remaining cb)))
+               n (.read ^java.io.Reader this a 0 (alength a))]
+           (when (pos? n) (.put cb a 0 n))
+           n))
+        ([^chars cbuf off len]
+         (let [p (int @pos)
+               n (min (int len) (int chunk) (- (count s) p))]
+           (cond
+             (zero? (int len)) 0
+             (<= n 0) -1
+             :else (do (.getChars s p (+ p n) cbuf (int off))
+                       (vswap! pos + n)
+                       n)))))
+      (close []))))
+
+(defn- read-all
+  "Reads values until eof through a fresh oda reader over `src`."
+  [src opts]
+  (with-open [r (oda/reader src opts)]
+    (into [] (take-while #(not= ::eof %)) (repeatedly #(oda/read r {:eof-value ::eof})))))
+
+(deftest reader-sketch
+  (is (= [{:a 1} {:a 2} ::eof]
+         (with-open [reader (oda/reader (java.io.StringReader. "{\"a\":1}\n{\"a\":2}")
+                                        {:key-fn keyword})]
+           [(oda/read reader)
+            (oda/read reader)
+            (oda/read reader {:eof-value ::eof})]))))
+
+(deftest reader-values-and-separators
+  (let [src "{\"a\":[1,2]} [3]\"s\"\t42\n-1.5e3 true false null{}[]\r\n\"\\\"}\" 7"]
+    (doseq [chunk [1 2 3 1000]
+            input [(trickle-stream (.getBytes src "UTF-8") chunk)
+                   (trickle-reader src chunk)]]
+      (is (= [{"a" [1 2]} [3] "s" 42 -1500.0 true false nil {} [] "\"}" 7]
+             (read-all input nil))
+          (str chunk " " (class input)))))
+  (is (= [] (read-all (java.io.StringReader. "") nil)))
+  (is (= [] (read-all (java.io.StringReader. " \n\t ") nil)))
+  ;; options apply to every value
+  (is (= [{:a 1.5M} {:b 2}] (read-all (java.io.StringReader. "{\"a\":1.5}{\"b\":2}")
+                                      {:key-fn keyword :bigdec true}))))
+
+(deftest reader-non-ascii-across-chunk-boundaries
+  (let [s "[\"é🎵€\",\"\\u00e9\\ud834\\udd1e\"] {\"ключ\":\"值\"} \"🎵\""
+        expected [["é🎵€" "é𝄞"] {"ключ" "值"} "🎵"]]
+    (doseq [chunk [1 2 3 5]]
+      (is (= expected (read-all (trickle-reader s chunk) nil)) (str "reader " chunk))
+      (is (= expected (read-all (trickle-stream (.getBytes s "UTF-8") chunk) nil))
+          (str "stream " chunk))))
+  ;; lone surrogates from a Reader become U+FFFD, like the writer
+  (is (= ["a�b"] (read-all (java.io.StringReader. (str "\"a" (char 0xD800) "b\"")) nil))))
+
+(deftest reader-eof
+  (with-open [r (oda/reader (java.io.StringReader. "1 "))]
+    (is (= 1 (oda/read r)))
+    (is (thrown? java.io.EOFException (oda/read r)))
+    (is (nil? (oda/read r {:eof-value nil})))
+    (is (= ::eof (oda/read r {:eof-value ::eof}))))
+  ;; a value cut off by eof is invalid input, not a clean eof
+  (doseq [s ["{\"a\":1" "[1," "\"abc" "tru" "-" "{\"a\":1}{"]]
+    (is (thrown? JsonParseException (read-all (java.io.StringReader. s) nil)) s)))
+
+(deftest reader-does-not-wait-for-eof
+  (let [out (java.io.PipedOutputStream.)
+        in (java.io.PipedInputStream. out)
+        r (oda/reader in {:key-fn keyword})
+        write! #(do (.write out (.getBytes ^String % "UTF-8")) (.flush out))]
+    (write! "{\"a\":1}")
+    (is (= {:a 1} (deref (future (oda/read r)) 2000 ::timeout)))
+    (write! "[2] \"three\"")
+    (is (= [2] (deref (future (oda/read r)) 2000 ::timeout)))
+    (is (= "three" (deref (future (oda/read r)) 2000 ::timeout)))
+    ;; a top-level number needs one byte of lookahead to know it ended
+    (write! " 42")
+    (let [pending (future (oda/read r))]
+      (is (= ::timeout (deref pending 300 ::timeout)))
+      (write! "\n")
+      (is (= 42 (deref pending 2000 ::timeout))))
+    (.close out)
+    (is (= ::eof (deref (future (oda/read r {:eof-value ::eof})) 2000 ::timeout)))))
+
+(deftest reader-errors
+  ;; positions count from the start of the stream, not of the value
+  (let [e (try (read-all (java.io.StringReader. "{\"a\":1}\n{\"a\" 1}") nil)
+               (catch JsonParseException e e))]
+    (is (= {:offset 13 :line 2 :column 6} (ex-data e)))
+    (is (re-find #"expected ':' at line 2, column 6 \(offset 13\)" (ex-message e))))
+  ;; also far into a stream, after the reader's buffer has been recycled
+  (let [lines (str (str/join "\n" (repeat 20000 "{\"k\":\"vvvvvvvvvvvvvvvvvvvvvv\"}")) "\n  x")
+        e (try (read-all (trickle-stream (.getBytes lines "UTF-8") 4096) nil)
+               (catch JsonParseException e e))]
+    (is (= {:offset (- (count lines) 1) :line 20001 :column 3} (ex-data e))))
+  ;; garbage between values fails on the read that reaches it
+  (with-open [r (oda/reader (java.io.StringReader. "{} x {}"))]
+    (is (= {} (oda/read r)))
+    (is (thrown? JsonParseException (oda/read r))))
+  (is (thrown? IllegalArgumentException (oda/reader "not a stream"))))
+
+(deftest reader-hostile-input
+  ;; endless nesting fails at max-depth instead of buffering forever
+  (let [endless (proxy [java.io.InputStream] []
+                  (read ([] (int \[))
+                    ([^bytes b off len]
+                     (java.util.Arrays/fill b (int off) (+ (int off) (int len)) (byte (int \[)))
+                     len)))]
+    (is (thrown-with-msg? JsonParseException #"max nesting depth"
+                          (oda/read (oda/reader endless {:max-depth 100}))))))
+
+(deftest reader-byte-order-mark
+  (is (= [{} [1]] (read-all (java.io.ByteArrayInputStream.
+                             (byte-array (concat [0xEF 0xBB 0xBF] (.getBytes "{} [1]" "UTF-8"))))
+                            nil))))
+
+(deftest reader-close-closes-source
+  (let [closed (atom false)
+        src (proxy [java.io.StringReader] ["{}"]
+              (close [] (reset! closed true)))]
+    (with-open [r (oda/reader src)]
+      (is (= {} (oda/read r))))
+    (is @closed)))
+
+(def gen-separator
+  (gen/elements [" " "\n" "\t" "\r\n" "  \n  "]))
+
+(defn- expected-position
+  "{:offset :line :column} of the end of string s, computed the slow way."
+  [^String s]
+  (let [last-nl (.lastIndexOf s "\n")
+        tail (subs s (inc last-nl))]
+    {:offset (alength (.getBytes s "UTF-8"))
+     :line (inc (count (filter #{\newline} s)))
+     :column (inc (.codePointCount tail 0 (count tail)))}))
+
+(defspec reader-error-positions-across-buffer-refills 100
+  ;; positions of an error after many values (beyond the 8KB buffer, so
+  ;; consumed input is dropped and counted 8 bytes at a time) match the
+  ;; reference count, with multi-byte chars and newlines anywhere
+  (prop/for-all [vs (gen/vector (gen/one-of [gen-json (gen/elements ["é🎵\n€" "ключ" "\n\n"])])
+                                1 30)
+                 pretty (gen/vector gen/boolean 30)
+                 seps (gen/vector gen-separator 30)
+                 chunk (gen/choose 1 4096)]
+                (let [pretty-mapper (j/object-mapper {:pretty true})
+                      pad (j/write-value-as-string (vec (repeat 400 "pad é🎵 pad\n")) pretty-mapper)
+                      docs (cons pad (map (fn [v p] (if p (j/write-value-as-string v pretty-mapper)
+                                                        (j/write-value-as-string v)))
+                                          vs pretty))
+                      prefix (str (apply str (interleave docs seps)) " \"é🎵\" ")
+                      e (try (read-all (trickle-stream (.getBytes (str prefix "x") "UTF-8") chunk) nil)
+                             nil
+                             (catch JsonParseException e e))]
+                  (= (expected-position prefix) (ex-data e)))))
+
+(defspec reader-equals-parse-per-document 300
+  ;; documents written compact or pretty, separated by whitespace and read
+  ;; through chunks of any size equal parsing each document on its own
+  (prop/for-all [vs (gen/vector gen-json 0 8)
+                 pretty (gen/vector gen/boolean 8)
+                 seps (gen/vector gen-separator 8)
+                 chunk (gen/choose 1 9)]
+                (let [pretty-mapper (j/object-mapper {:pretty true})
+                      docs (map (fn [v p] (if p (j/write-value-as-string v pretty-mapper)
+                                              (j/write-value-as-string v)))
+                                vs pretty)
+                      src (apply str (interleave docs seps))]
+                  (= (mapv oda/parse docs)
+                     (read-all (trickle-stream (.getBytes ^String src "UTF-8") chunk) nil)
+                     (read-all (trickle-reader src chunk) nil)))))
+
+(defspec fuzz-reader-mutated-streams 3000
+  ;; the incremental reader over mutated input, in odd-sized chunks: values
+  ;; or JsonParseException, nothing else; and when parse accepts the whole
+  ;; document, reading it as a stream yields exactly that one value
+  (prop/for-all [bs gen-mutated-doc
+                 chunk (gen/choose 1 7)
+                 opts (gen/elements fuzz-opts)]
+                (let [streamed (try {:ok (read-all (trickle-stream bs chunk) opts)}
+                                    (catch JsonParseException _ :rejected)
+                                    (catch Throwable t
+                                      (println "unexpected" (class t) (ex-message t)
+                                               (mapv #(format "%02x" (bit-and % 0xff)) bs))
+                                      :bug))
+                      parsed (try {:ok [(oda/parse bs opts)]} (catch JsonParseException _ nil))]
+                  (and (not= :bug streamed)
+                       (or (nil? parsed) (= parsed streamed))))))
+
 (deftest corpus-round-trip
   (doseq [^java.io.File f (suite-files)
           :let [n (.getName f)]

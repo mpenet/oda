@@ -155,6 +155,20 @@ public final class JsonParser {
     }
 
     /**
+     * Parses one value at the start of the span (no leading whitespace or
+     * byte order mark), ignoring whatever follows it: the incremental
+     * reader's entry. The value's end is stored in end[0]. Running out of
+     * input mid-value is reported like any invalid input.
+     */
+    static Object parsePrefix(byte[] buf, int offset, int length, IFn keyFn, int maxDepth,
+                              int maxNumberLength, boolean bigdec, int[] end) {
+        JsonParser p = new JsonParser(buf, offset, length, keyFn, maxDepth, maxNumberLength, bigdec);
+        Object v = p.parseValue(0, p.nextToken());
+        end[0] = p.pos;
+        return v;
+    }
+
+    /**
      * Dispatches on the token byte returned by nextToken (pos points at it):
      * fusing the whitespace skip with dispatch keeps the byte in a register
      * instead of re-reading buf[pos] after a field round-trip.
@@ -1015,7 +1029,7 @@ public final class JsonParser {
     private static final long SEVEN_F = 0x7F7F7F7F7F7F7F7FL;
 
     /** Exact per-lane zero test (no inter-lane carries): 0x80 where byte == 0. */
-    private static long zeroMask(long v) {
+    static long zeroMask(long v) {
         return ~(((v & SEVEN_F) + SEVEN_F) | v | SEVEN_F);
     }
 

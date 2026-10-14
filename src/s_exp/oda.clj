@@ -3,8 +3,9 @@
 
 (ns s-exp.oda
   "Fast JSON parser/writer working directly on UTF-8 bytes."
+  (:refer-clojure :exclude [read])
   (:import (clojure.lang IFn)
-           (com.s_exp.oda JsonParser JsonWriter)
+           (com.s_exp.oda JsonParser JsonReader JsonWriter)
            (java.io InputStream OutputStream)
            (java.nio.charset StandardCharsets)))
 
@@ -44,6 +45,38 @@
                        (int (or max-depth default-max-depth))
                        (int (or max-number-length default-max-number-length))
                        (boolean bigdec)))))
+
+(defn reader
+  "Returns a reader of successive JSON values from `source` (InputStream or
+  java.io.Reader), for `read`. Values may be separated by whitespace; each
+  read only pulls input until the next value's end, without waiting for
+  the end of the stream (a top-level number needs one byte of lookahead).
+  Input read past a value stays buffered in the reader, so read the stream
+  only through it. Closing it closes `source`. Not thread-safe.
+
+  Takes the options of `parse`, applied to every value."
+  (^JsonReader [source]
+   (reader source nil))
+  (^JsonReader [source {:keys [key-fn max-depth max-number-length bigdec]}]
+   (JsonReader. source ^IFn key-fn
+                (int (or max-depth default-max-depth))
+                (int (or max-number-length default-max-number-length))
+                (boolean bigdec))))
+
+(defn read
+  "Reads the next JSON value from `reader` (see `reader`).
+
+  Options:
+  * `:eof-value` - returned when the input ends before another value
+    starts. Without it, the end of input throws java.io.EOFException.
+
+  A value cut off by the end of input throws
+  `com.s_exp.oda.JsonParseException`, with positions counted from the
+  start of the stream."
+  ([^JsonReader reader]
+   (.read reader false nil))
+  ([^JsonReader reader opts]
+   (.read reader (contains? opts :eof-value) (:eof-value opts))))
 
 (defn write-str
   "Writes `x` as a JSON String.

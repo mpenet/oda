@@ -15,15 +15,18 @@ public final class JsonParseException extends RuntimeException implements IExcep
     private static final Keyword LINE = Keyword.intern("line");
     private static final Keyword COLUMN = Keyword.intern("column");
 
-    /** Byte offset into the input. */
-    public final int position;
+    /** Byte offset into the input (a stream's: since its start). */
+    public final long position;
     /** 1-based line number. */
     public final int line;
     /** 1-based column, counted in characters (code points). */
     public final int column;
+    /** What went wrong, without the position suffix. */
+    final String reason;
 
-    public JsonParseException(String message, int position, int line, int column) {
-        super(message + " at line " + line + ", column " + column + " (offset " + position + ")");
+    public JsonParseException(String reason, long position, int line, int column) {
+        super(reason + " at line " + line + ", column " + column + " (offset " + position + ")");
+        this.reason = reason;
         this.position = position;
         this.line = line;
         this.column = column;
@@ -33,6 +36,6 @@ public final class JsonParseException extends RuntimeException implements IExcep
     @Override
     public IPersistentMap getData() {
         return new PersistentArrayMap(new Object[] {
-                OFFSET, (long) position, LINE, (long) line, COLUMN, (long) column});
+                OFFSET, position, LINE, (long) line, COLUMN, (long) column});
     }
 }

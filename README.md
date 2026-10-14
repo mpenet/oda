@@ -44,6 +44,33 @@ git checkout instead, compile it once with `clj -T:build javac`.
 (oda/write {:a 1} output-stream)    ;; progressive, bounded memory
 ```
 
+### Incremental reads
+
+`reader` wraps an `InputStream` or `java.io.Reader` holding successive JSON
+values (NDJSON, concatenated or pretty-printed documents, a socket); each
+`read` returns the next value without waiting for the end of the stream:
+
+```clojure
+(with-open [r (oda/reader (java.io.StringReader. "{\"a\":1}\n{\"a\":2}")
+                          {:key-fn keyword})]
+  [(oda/read r)
+   (oda/read r)
+   (oda/read r {:eof-value ::eof})])
+;; => [{:a 1} {:a 2} :user/eof]
+```
+
+- takes the options of `parse`, applied to every value
+- at the end of input `read` returns `:eof-value`, or throws
+  `java.io.EOFException` without it; a value cut off by the end of input is
+  a `JsonParseException`, positioned from the start of the stream
+- input read past a value stays buffered in the reader: read the stream
+  only through it. Closing the reader closes the source
+- a top-level number needs one byte of lookahead (or the end of input) to
+  know it ended; objects, arrays, strings and literals do not
+- `InputStream` is the fast path (about 20% over parsing pre-split
+  documents, single pass for buffered values); a `java.io.Reader` is
+  re-encoded to UTF-8 first
+
 ### Options
 
 `parse`:

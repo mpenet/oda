@@ -898,9 +898,12 @@ public final class JsonWriter {
                     return ((long) (i + 2) << 32) | p;
                 }
             }
-            b[p++] = (byte) 0xEF;
-            b[p++] = (byte) 0xBF;
-            b[p++] = (byte) 0xBD;
+            b[p++] = '\\';
+            b[p++] = 'u';
+            b[p++] = 'd';
+            b[p++] = HEX_DIGITS[(c >> 8) & 0xf];
+            b[p++] = HEX_DIGITS[(c >> 4) & 0xf];
+            b[p++] = HEX_DIGITS[c & 0xf];
             i++;
         } else {
             b[p++] = (byte) (0xE0 | (c >> 12));
@@ -957,7 +960,8 @@ public final class JsonWriter {
                 b[p++] = (byte) (0x80 | (c & 0x3F));
                 i++;
             } else if (c >= 0xD800 && c <= 0xDFFF) {
-                // surrogate: valid pair -> 4-byte UTF-8, lone -> U+FFFD
+                // surrogate: valid pair -> 4-byte UTF-8, lone -> \\uXXXX
+                // escape (no UTF-8 form; escaping keeps the code unit)
                 if (c <= 0xDBFF && i + 1 < len) {
                     char c2 = cs[i + 1];
                     if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
@@ -970,9 +974,12 @@ public final class JsonWriter {
                         continue;
                     }
                 }
-                b[p++] = (byte) 0xEF;
-                b[p++] = (byte) 0xBF;
-                b[p++] = (byte) 0xBD;
+                b[p++] = '\\';
+                b[p++] = 'u';
+                b[p++] = 'd';
+                b[p++] = HEX_DIGITS[(c >> 8) & 0xf];
+                b[p++] = HEX_DIGITS[(c >> 4) & 0xf];
+                b[p++] = HEX_DIGITS[c & 0xf];
                 i++;
             } else {
                 b[p++] = (byte) (0xE0 | (c >> 12));
@@ -1076,7 +1083,7 @@ public final class JsonWriter {
         cs[0] = c;
         int p = n;
         buf[p++] = '"';
-        // a lone surrogate has no companion within one char: U+FFFD
+        // a lone surrogate has no companion within one char: escaped
         p = (int) encodeDirty(cs, 0, 1, p);
         buf[p++] = '"';
         n = p;

@@ -533,11 +533,9 @@
   ;; and escapes landing on and around them
   (prop/for-all [parts (gen/vector gen-string-char 0 3000)
                  pad (gen/choose 8180 8200)]
-                (let [s (str (apply str (repeat pad "a")) (apply str parts))
-                      ;; lone surrogates have no UTF-8 encoding: written as U+FFFD
-                      expected (str/replace s #"[\uD800-\uDFFF]" "�")]
-                  (and (= expected (oda/parse (oda/write-str s)))
-                       (= expected (oda/parse (oda/write-bytes s)))))))
+                (let [s (str (apply str (repeat pad "a")) (apply str parts))]
+                  (and (= s (oda/parse (oda/write-str s)))
+                       (= s (oda/parse (oda/write-bytes s)))))))
 
 (deftest writer-char-direct
   ;; Character path bypasses String.valueOf allocation; must match
@@ -765,9 +763,26 @@
   (is (thrown? IllegalArgumentException
                (oda/write-str (to-array [(to-array [1])]) {:max-depth 1}))))
 
+(defn- code-units [^String s]
+  (mapv #(format "U+%04X" (int %)) s))
+
 (deftest writer-lone-surrogate
-  ;; lone surrogates cannot be encoded as UTF-8; we emit U+FFFD
-  (is (= "\"�\"" (oda/write-str (String. (char-array [(char 0xD800)]))))))
+  ;; lone surrogates have no UTF-8 encoding: written as \u escapes, so
+  ;; strings round-trip code unit for code unit
+  (is (= "\"\\ud800\"" (oda/write-str "\uD800")))
+  (is (= ["U+D800"] (code-units (oda/parse (oda/write-str "\uD800")))))
+  (is (= ["U+DC00" "U+0061" "U+D83C"] (code-units (oda/parse (oda/write-bytes "\uDC00a\uD83C")))))
+  ;; reversed pair: two lone surrogates
+  (is (= "\"\\udfb5\\ud83c\"" (oda/write-str "\uDFB5\uD83C")))
+  ;; a valid pair stays raw UTF-8
+  (is (= "\"🎵\"" (oda/write-str "\uD83C\uDFB5")))
+  (is (= "\"\\udbff\"" (oda/write-str (char 0xDBFF))))
+  ;; distinct keys stay distinct: short (cached fragment) and long keys
+  (is (= 2 (count (oda/parse (oda/write-str {"\uD800" 1 "\uDC00" 2})))))
+  (let [pad (apply str (repeat 100 "k"))]
+    (is (= #{(str pad "\uD800") (str pad "\uDC00")}
+           (set (keys (oda/parse (oda/write-bytes {(str pad "\uD800") 1 (str pad "\uDC00") 2})))))))
+  (is (= {:a "\uDFFF"} (oda/parse (oda/write-str {:a "\uDFFF"}) {:key-fn keyword}))))
 
 ;; ------------------------------------------------------------------ encoders
 
@@ -1173,7 +1188,8 @@
       (is (= expected (read-all (trickle-reader s chunk) nil)) (str "reader " chunk))
       (is (= expected (read-all (trickle-stream (.getBytes s "UTF-8") chunk) nil))
           (str "stream " chunk))))
-  ;; lone surrogates from a Reader become U+FFFD, like the writer
+  ;; a lone surrogate in Reader input is malformed text: U+FFFD, as for
+  ;; malformed UTF-8 in byte input
   (is (= ["a�b"] (read-all (java.io.StringReader. (str "\"a" (char 0xD800) "b\"")) nil))))
 
 (deftest reader-eof
